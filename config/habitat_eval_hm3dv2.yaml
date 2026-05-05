@@ -1,0 +1,145 @@
+defaults:
+- /benchmark/nav/objectnav:
+  - objectnav_hm3d
+- _self_
+habitat_baselines:
+  evaluate: true
+  force_torch_single_threaded: true
+habitat:
+  dataset:
+    split: val
+    data_path: data/datasets/objectnav/hm3d/v2/{split}/{split}.json.gz
+  environment:
+    max_episode_steps: 500
+    iterator_options:
+      cycle: false
+      shuffle: false
+      max_scene_repeat_steps: 10000000
+  task:
+    lab_sensors:
+      gps_sensor:
+        type: GPSSensor
+        dimensionality: 3
+    measurements:
+      success:
+        success_distance: 0.2
+  simulator:
+    habitat_sim_v0:
+      allow_sliding: false
+    forward_step_size: 0.25
+    turn_angle: 30
+    agents:
+      main_agent:
+        radius: 0.18
+        sim_sensors:
+          depth_sensor:
+            min_depth: 0.0
+            max_depth: 5.0
+            normalize_depth: true
+detector:
+  enable_landmark_detection: true
+  publish_landmarks_to_map: false
+  max_landmark_detections: 12
+  landmark_labels: [chair, couch, potted plant, bed, dining table, toilet, tv, sink, refrigerator, microwave, oven, book, clock, vase, bottle, cup]
+  yolo:
+    confidence_threshold_yolo: 0.3
+    iou_threshold_yolo: 0.5
+    agnostic_nms: true
+  groundingDINO:
+    confidence_threshold_dino: 0.4
+    text_threshold: 0.25
+llm:
+  llm_answer_path: llm/answers/llm_answer_hm3d.txt
+  llm_response_path: llm/answers/llm_response_list.txt
+  llm_client:
+    llm_client: ollama
+    ollama: qwen3:8b
+record_file_name: record.txt
+continue_file_name: continue.txt
+need_video: false
+video_output_path: videos/test_hm3dv2_{split}
+test_epi_num: -1
+reflective_agent:
+  enable_reflective_agent: true
+  python_executable: /root/miniconda3/envs/apexnav/bin/python
+  project_root: /root/autodl-tmp/ApexNav/agent-Apexnav
+  enable_vlm_skill_selector: true
+  vlm_provider: local
+  vlm_model: qwen2.5-vl-7b-instruct
+  vlm_model_env: OPENAI_MODEL
+  vlm_api_key: local
+  vlm_base_url: http://127.0.0.1:18000/v1
+  vlm_base_url_env: OPENAI_BASE_URL
+  vlm_api_key_env: OPENAI_API_KEY
+  vlm_timeout_seconds: 30.0
+  vlm_temperature: 0.0
+  vlm_force_json_response_format: true
+  max_vlm_calls_per_episode: 100
+  force_all_decisions_to_FALLBACK_APEXNAV: false
+  mock_follow_apexnav_by_default: true
+  enable_rgb_observation: true
+  rgb_observation_max_width: 160
+  rgb_observation_jpeg_quality: 55
+  enable_semantic_map_observation: false
+  semantic_map_max_width: 160
+  semantic_map_crop_size_m: 12.0
+  semantic_map_jpeg_quality: 75
+  include_detected_objects_in_state: true
+  enable_yolo_landmark_detection: true
+  max_landmark_detections: 12
+  min_commitment_steps_for_explore: 10
+  max_commitment_steps_semantic: 80
+  max_commitment_steps_geometric: 80
+  max_commitment_steps_fallback: 80
+  max_commitment_steps_recovery: 40
+  structural_frontier_count_change_ratio: 0.3
+  structural_frontier_stable_k: 3
+  stable_target_event_k: 2
+  enable_decision_validator: true
+  enable_monitored_skill_executor: true
+  enable_reflection_memory: true
+  enable_episode_reflection: true
+  memory_path: data/reflection_memory.jsonl
+  memory_read_mode: enabled
+  memory_write_mode: all
+  max_retrieved_lessons: 5
+  max_reflection_memory_items: 10000
+  agent_decision_interval: waypoint
+  fallback_policy: apexnav
+  target_verify_threshold: 0.65
+  target_stop_threshold: 0.75
+  require_multiview_before_stop: true
+  semantic_peak_ratio_threshold: 2.5
+  semantic_peak_std_threshold: 0.15
+  stuck_threshold: 3
+  same_frontier_failure_threshold: 2
+  low_information_gain_threshold: 0.01
+  enable_policy_patch_table: true
+  policy_patch_path: data/policy_patches.json
+  auto_activate_policy_patches: false
+  min_policy_patch_support: 3
+  disable_failure_taxonomy: false
+  disable_recover_from_stuck: false
+  policy_patch_confidence_threshold: 0.7
+  enable_episode_logger: true
+  episode_log_root: logs/reflective_agent
+  run_id: qwen7b_local
+  enable_learning_from_traces: true
+  enable_self_hindsight_learning: false
+  enable_baseline_teacher_learning: false
+  enable_gt_teacher_learning: true
+  enable_runtime_gt_progress_learning: true
+  enable_gt_trajectory_learning: true
+  enable_vlm_gt_trajectory_reflection: true
+  gt_progress_min_delta: 0.25
+  gt_path_deviation_threshold: 1.5
+  gt_path_deviation_growth_threshold: 0.5
+  gt_path_max_points: 80
+  gt_path_reflection_lookahead: 3
+  max_gt_trajectory_reflections_per_episode: 3
+  gt_learning_max_samples_per_episode: 8
+  tool_call_dataset_path: data/tool_call_learning_samples.jsonl
+  baseline_teacher_log_path: ''
+  gt_trajectory_path: ''
+  learning_write_mode: all
+  learning_record_policy_patches: true

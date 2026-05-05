@@ -1,0 +1,5 @@
+RUN_ID=agent_snapshot_ep2_20260427_220633 BASE=/root/autodl-tmp/ApexNav/agent-Apexnav/repro/per_episode/agent_snapshot_ep2_20260427_220633 START_EP=2 END_EP=2
+VLM_PORTS=gdino:17281 blip2itm:17282 mobile_sam:17283 yolov7:17284
+===== EPISODE 2 Mon 27 Apr 2026 10:07:22 PM CST =====
+episode=2 rc=0 dur=243s
+DONE Mon 27 Apr 2026 10:11:45 PM CST

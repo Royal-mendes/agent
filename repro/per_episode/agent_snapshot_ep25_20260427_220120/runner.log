@@ -1,0 +1,5 @@
+RUN_ID=agent_snapshot_ep25_20260427_220120 BASE=/root/autodl-tmp/ApexNav/agent-Apexnav/repro/per_episode/agent_snapshot_ep25_20260427_220120 START_EP=25 END_EP=25
+VLM_PORTS=gdino:17181 blip2itm:17182 mobile_sam:17183 yolov7:17184
+===== EPISODE 25 Mon 27 Apr 2026 10:02:17 PM CST =====
+episode=25 rc=0 dur=213s
+DONE Mon 27 Apr 2026 10:06:09 PM CST

@@ -1,0 +1,726 @@
+diff --git a/basic_utils/failure_check/failure_check.py b/basic_utils/failure_check/failure_check.py
+index a717603..97dc6b6 100644
+--- a/basic_utils/failure_check/failure_check.py
++++ b/basic_utils/failure_check/failure_check.py
+@@ -71,8 +71,12 @@ def check_failure(
+     else:
+         # Active stop
+         if not step_out and final_state != FINAL_RESULT.STUCKING:
++            # Think found object but found wrong one. This should take precedence
++            # over SEARCH_EXTREME because the agent already committed to an object.
++            if final_state == FINAL_RESULT.REACH_OBJECT and not near_object:
++                failure = "false positive"
+             # No more frontiers
+-            if (
++            elif (
+                 final_state == FINAL_RESULT.NO_FRONTIER
+                 or expl_result == EXPL_RESULT.SEARCH_EXTREME
+             ):
+@@ -80,9 +84,6 @@ def check_failure(
+                     failure = "[no frontier] false negative"
+                 else:
+                     failure = "no frontier"
+-            # Think found object but found wrong one
+-            elif final_state == FINAL_RESULT.REACH_OBJECT and not near_object:
+-                failure = "false positive"
+             else:
+                 failure = "unknown failure (active stop)"
+         # Passive stop
+diff --git a/habitat2ros/habitat_publisher.py b/habitat2ros/habitat_publisher.py
+index 43c4db9..1b0d4d5 100644
+--- a/habitat2ros/habitat_publisher.py
++++ b/habitat2ros/habitat_publisher.py
+@@ -1,7 +1,6 @@
+ import rospy
+ from sensor_msgs.msg import Image
+ from nav_msgs.msg import Odometry
+-from cv_bridge import CvBridge
+ from geometry_msgs.msg import Pose, Quaternion, Point, PoseStamped
+ from tf.transformations import quaternion_from_euler
+ from habitat.core.simulator import Observations
+@@ -16,19 +15,50 @@ class ROSPublisher:
+         self.rgb_pub = rospy.Publisher("/habitat/camera_rgb", Image, queue_size=10)
+         self.odom_pub = rospy.Publisher("/habitat/odom", Odometry, queue_size=10)
+         self.pose_pub = rospy.Publisher("/habitat/sensor_pose", Odometry, queue_size=10)
+-        # Create cv_bridge object
+-        self.bridge = CvBridge()
++
++    @staticmethod
++    def _encoding_for_passthrough(image):
++        channels = 1 if image.ndim == 2 else image.shape[2]
++        if image.dtype == np.float32:
++            prefix = "32FC"
++        elif image.dtype == np.float64:
++            prefix = "64FC"
++        elif image.dtype == np.uint8:
++            prefix = "8UC"
++        elif image.dtype == np.uint16:
++            prefix = "16UC"
++        else:
++            raise TypeError(f"Unsupported image dtype for ROS Image: {image.dtype}")
++        return f"{prefix}{channels}"
++
++    @classmethod
++    def _to_image_msg(cls, image, encoding, stamp):
++        image = np.asarray(image)
++        if image.ndim == 3 and image.shape[2] == 1:
++            image = image[:, :, 0]
++        image = np.ascontiguousarray(image)
++
++        msg = Image()
++        msg.header.stamp = stamp
++        msg.header.frame_id = "world"
++        msg.height = image.shape[0]
++        msg.width = image.shape[1]
++        msg.encoding = (
++            cls._encoding_for_passthrough(image)
++            if encoding == "passthrough"
++            else encoding
++        )
++        msg.is_bigendian = 0
++        msg.step = image.strides[0]
++        msg.data = image.tobytes()
++        return msg
+ 
+     def publish_depth(self, ros_time, depth_image):
+-        depth_msg = self.bridge.cv2_to_imgmsg(depth_image, encoding="passthrough")
+-        depth_msg.header.stamp = ros_time
+-        depth_msg.header.frame_id = "world"
++        depth_msg = self._to_image_msg(depth_image, encoding="passthrough", stamp=ros_time)
+         self.depth_pub.publish(depth_msg)
+ 
+     def publish_rgb(self, ros_time, rgb_image):
+-        rgb_msg = self.bridge.cv2_to_imgmsg(rgb_image, encoding="rgb8")
+-        rgb_msg.header.stamp = ros_time
+-        rgb_msg.header.frame_id = "world"
++        rgb_msg = self._to_image_msg(rgb_image, encoding="rgb8", stamp=ros_time)
+         self.rgb_pub.publish(rgb_msg)
+ 
+     def publish_robot_odom(self, ros_time, gps, compass):
+diff --git a/habitat_evaluation.py b/habitat_evaluation.py
+index 9316a73..3549306 100644
+--- a/habitat_evaluation.py
++++ b/habitat_evaluation.py
+@@ -204,6 +204,13 @@ def main(cfg: DictConfig) -> None:
+     env_num_once = cfg.test_epi_num  # Which episode to test for single run
+     flag_once = env_num_once != -1  # Whether to run single test
+ 
++    # Optional controls for parallel full-evaluation shards. Use Hydra overrides
++    # such as +episode_start=0 +episode_stride=4 +episode_limit=250.
++    episode_start = int(cfg.get("episode_start", 0))
++    episode_stride = int(cfg.get("episode_stride", 1))
++    episode_limit = int(cfg.get("episode_limit", -1))
++    shard_mode = (not flag_once) and (episode_start != 0 or episode_stride != 1 or episode_limit != -1)
++
+     # Create directories if they don't exist
+     os.makedirs(os.path.dirname(llm_answer_path), exist_ok=True)
+     os.makedirs(video_output_path, exist_ok=True)
+@@ -251,7 +258,19 @@ def main(cfg: DictConfig) -> None:
+ 
+     pbar = tqdm.tqdm(total=env.number_of_episodes)
+ 
+-    env_count = num_total if not flag_once else env_num_once
++    if shard_mode:
++        if episode_stride < 1:
++            raise ValueError("episode_stride must be >= 1")
++        if episode_start < 0 or episode_start >= number_of_episodes:
++            raise ValueError("episode_start is out of range")
++        env_count = episode_start + num_total * episode_stride
++        shard_remaining = (number_of_episodes - episode_start + episode_stride - 1) // episode_stride - num_total
++        if episode_limit != -1:
++            shard_remaining = min(shard_remaining, max(0, episode_limit - num_total))
++    else:
++        env_count = num_total if not flag_once else env_num_once
++        shard_remaining = number_of_episodes - num_total
++
+     while env_count:
+         pbar.update()
+         env.current_episode = next(env.episode_iterator)
+@@ -278,7 +297,7 @@ def main(cfg: DictConfig) -> None:
+     progress_pub = rospy.Publisher("/habitat/progress", Int32MultiArray, queue_size=10)
+     record_pub = rospy.Publisher("/habitat/record", Float32MultiArray, queue_size=10)
+ 
+-    for epi in range(number_of_episodes - num_total):
++    for epi in range(shard_remaining):
+         # Publish progress information
+         publish_int32_array(progress_pub, [num_total, number_of_episodes])
+ 
+@@ -552,7 +571,10 @@ def main(cfg: DictConfig) -> None:
+         publish_float32_array(record_pub, record_data)
+ 
+         pbar.update()
+-        env.current_episode = next(env.episode_iterator)
++        if epi != shard_remaining - 1:
++            advance_steps = episode_stride if shard_mode else 1
++            for _ in range(advance_steps):
++                env.current_episode = next(env.episode_iterator)
+         rospy.sleep(0.1)  # wait a moment
+ 
+     env.close()
+diff --git a/src/planner/exploration_manager/CMakeLists.txt b/src/planner/exploration_manager/CMakeLists.txt
+index 8408d78..95023d2 100755
+--- a/src/planner/exploration_manager/CMakeLists.txt
++++ b/src/planner/exploration_manager/CMakeLists.txt
+@@ -4,7 +4,8 @@ project(exploration_manager)
+ set(CMAKE_BUILD_TYPE "Release")
+ set(CMAKE_CXX_FLAGS "-std=c++11")
+ set(CMAKE_CXX_STANDARD 14)
+-set(CMAKE_CXX_FLAGS_RELEASE "-O3 -Wall")
++set(CMAKE_CXX_FLAGS_RELEASE "-O0 -g0 -Wall")
++option(APEXNAV_ENABLE_TRAJ_FSM "Build real-world continuous trajectory FSM" OFF)
+ 
+ find_package(Eigen3 REQUIRED)
+ find_package(PCL 1.7 REQUIRED)
+@@ -36,12 +37,20 @@ include_directories(
+   ${PCL_INCLUDE_DIRS}
+ )
+ 
+-add_executable(exploration_node
++set(EXPLORATION_NODE_SOURCES
+   src/exploration_node.cpp
+   src/exploration_fsm.cpp
+-  src/exploration_fsm_traj.cpp
+   src/exploration_manager.cpp
+ )
++
++if(APEXNAV_ENABLE_TRAJ_FSM)
++  add_definitions(-DAPEXNAV_ENABLE_TRAJ_FSM)
++  list(APPEND EXPLORATION_NODE_SOURCES src/exploration_fsm_traj.cpp)
++endif()
++
++add_executable(exploration_node
++  ${EXPLORATION_NODE_SOURCES}
++)
+ target_link_libraries(exploration_node
+   ${catkin_LIBRARIES}
+ )
+diff --git a/src/planner/exploration_manager/include/exploration_manager/exploration_data.h b/src/planner/exploration_manager/include/exploration_manager/exploration_data.h
+index d0f58c2..1271d82 100644
+--- a/src/planner/exploration_manager/include/exploration_manager/exploration_data.h
++++ b/src/planner/exploration_manager/include/exploration_manager/exploration_data.h
+@@ -2,17 +2,16 @@
+ #define _EXPL_DATA_H_
+ 
+ #include <Eigen/Eigen>
++#include <cmath>
+ #include <iostream>
++#include <memory>
++#include <string>
+ #include <vector>
+-#include <trajectory_manager/optimizer.h>
+-
+-// Undefine uint macro from optimizer.h to avoid conflict with OpenCV
+-#ifdef uint
+-#undef uint
+-#endif
+ 
+ namespace apexnav_planner {
+ 
++struct LocalTrajectory;
++
+ enum FINAL_RESULT { EXPLORE, SEARCH_OBJECT, STUCKING, NO_FRONTIER, REACH_OBJECT };
+ 
+ struct FSMData {
+@@ -54,7 +53,7 @@ struct FSMData {
+   // FSM data
+   bool trigger_, have_odom_, have_confidence_;
+   bool have_finished_;
+-  std::vector<string> state_str_;
++  std::vector<std::string> state_str_;
+   std::vector<Eigen::Vector2d> traveled_path_;
+ 
+   // odometry state
+@@ -80,7 +79,7 @@ struct FSMData {
+   std::vector<Eigen::Vector3d> stucking_points_;
+ 
+   Eigen::Vector2d local_pos_;
+-  LocalTrajectory newest_traj_;  // Store latest planned trajectory
++  std::shared_ptr<LocalTrajectory> newest_traj_;  // Store latest planned trajectory
+ };
+ 
+ struct FSMParam {
+diff --git a/src/planner/exploration_manager/include/exploration_manager/exploration_manager.h b/src/planner/exploration_manager/include/exploration_manager/exploration_manager.h
+index 9d15f1f..26574ec 100644
+--- a/src/planner/exploration_manager/include/exploration_manager/exploration_manager.h
++++ b/src/planner/exploration_manager/include/exploration_manager/exploration_manager.h
+@@ -138,7 +138,8 @@ inline bool ExplorationManager::searchFrontierPath(const Vector2d& start, const
+     Eigen::Vector2d& refined_pos, std::vector<Eigen::Vector2d>& refined_path)
+ {
+   path_finder_->reset();
+-  if (path_finder_->astarSearch(start, end, 0.25, 0.01) == Astar2D::REACH_END) {
++  if (path_finder_->astarSearch(
++          start, end, 0.25, 0.2, Astar2D::SAFETY_MODE::OPTIMISTIC) == Astar2D::REACH_END) {
+     refined_pos = end;
+     refined_path = path_finder_->getPath();
+     return true;
+@@ -222,4 +223,4 @@ inline vector<Eigen::Vector2i> ExplorationManager::allNeighbors(
+ 
+ }  // namespace apexnav_planner
+ 
+-#endif
+\ No newline at end of file
++#endif
+diff --git a/src/planner/exploration_manager/src/exploration_fsm.cpp b/src/planner/exploration_manager/src/exploration_fsm.cpp
+index 89ae96b..72c94dd 100644
+--- a/src/planner/exploration_manager/src/exploration_fsm.cpp
++++ b/src/planner/exploration_manager/src/exploration_fsm.cpp
+@@ -727,8 +727,6 @@ void ExplorationFSM::publishRobotMarker()
+ 
+ void ExplorationFSM::confidenceThresholdCallback(const std_msgs::Float64ConstPtr& msg)
+ {
+-  if (fd_->have_confidence_)
+-    return;
+   fd_->have_confidence_ = true;
+   expl_manager_->sdf_map_->object_map2d_->setConfidenceThreshold(msg->data);
+ }
+diff --git a/src/planner/exploration_manager/src/exploration_fsm_traj.cpp b/src/planner/exploration_manager/src/exploration_fsm_traj.cpp
+index 2ecbffc..3454f90 100644
+--- a/src/planner/exploration_manager/src/exploration_fsm_traj.cpp
++++ b/src/planner/exploration_manager/src/exploration_fsm_traj.cpp
+@@ -3,6 +3,7 @@
+ #include <exploration_manager/exploration_data.h>
+ #include <vis_utils/planning_visualization.h>
+ #include <geometry_msgs/PoseWithCovarianceStamped.h>
++#include <trajectory_manager/optimizer.h>
+ #include <tf/transform_datatypes.h>
+ 
+ namespace apexnav_planner {
+@@ -12,6 +13,7 @@ void ExplorationFSMReal::init(ros::NodeHandle& nh)
+   nh_ = nh;
+   fp_.reset(new FSMParam);
+   fd_.reset(new FSMData);
++  fd_->newest_traj_.reset(new LocalTrajectory);
+ 
+   /* Initialize main modules */
+   expl_manager_.reset(new ExplorationManager);
+@@ -149,10 +151,10 @@ void ExplorationFSMReal::FSMCallback(const ros::TimerEvent& e)
+ 
+     case RealFSM::State::EXEC_TRAJ: {
+       // Publish trajectory and transition to execution monitoring
+-      double dt = (ros::Time::now() - fd_->newest_traj_.start_time).toSec();
++      double dt = (ros::Time::now() - fd_->newest_traj_->start_time).toSec();
+       if (dt > 0) {
+         trajectory_manager::PolyTraj poly_msg;
+-        polyTraj2ROSMsg(fd_->newest_traj_, poly_msg);
++        polyTraj2ROSMsg(*fd_->newest_traj_, poly_msg);
+         poly_traj_pub_.publish(poly_msg);
+         fd_->static_state_ = false;
+         transitState(RealFSM::State::REPLAN, "FSM");
+@@ -250,7 +252,7 @@ TrajPlannerResult ExplorationFSMReal::callTrajectoryPlanner()
+   if (traj_res) {
+     auto info = &expl_manager_->gcopter_->local_trajectory_;
+     info->start_time = (ros::Time::now() - time_r).toSec() > 0 ? ros::Time::now() : time_r;
+-    fd_->newest_traj_ = expl_manager_->gcopter_->local_trajectory_;
++    *fd_->newest_traj_ = expl_manager_->gcopter_->local_trajectory_;
+     return TrajPlannerResult::SUCCESS;
+   }
+ 
+@@ -491,8 +493,6 @@ void ExplorationFSMReal::odometryCallback(const nav_msgs::OdometryConstPtr& msg)
+ 
+ void ExplorationFSMReal::confidenceThresholdCallback(const std_msgs::Float64ConstPtr& msg)
+ {
+-  if (fd_->have_confidence_)
+-    return;
+   fd_->have_confidence_ = true;
+   expl_manager_->sdf_map_->object_map2d_->setConfidenceThreshold(msg->data);
+   ROS_INFO("[Real] Confidence threshold set to: %.2f", msg->data);
+diff --git a/src/planner/exploration_manager/src/exploration_manager.cpp b/src/planner/exploration_manager/src/exploration_manager.cpp
+index 0032db5..28ef52c 100644
+--- a/src/planner/exploration_manager/src/exploration_manager.cpp
++++ b/src/planner/exploration_manager/src/exploration_manager.cpp
+@@ -12,8 +12,11 @@
+ #include <exploration_manager/exploration_data.h>
+ #include <lkh_mtsp_solver/SolveMTSP.h>
+ #include <plan_env/map_ros.h>
++
++#ifdef APEXNAV_ENABLE_TRAJ_FSM
+ #include <path_searching/kino_astar.h>
+ #include <trajectory_manager/optimizer.h>
++#endif
+ 
+ using namespace Eigen;
+ 
+@@ -55,6 +58,7 @@ void ExplorationManager::initialize(ros::NodeHandle& nh)
+   tsp_client_ = nh.serviceClient<lkh_mtsp_solver::SolveMTSP>("/solve_tsp", true);
+ 
+   // Initialize KinoAstar and GCopter for real-world trajectory planning
++#ifdef APEXNAV_ENABLE_TRAJ_FSM
+   kinoastar_.reset(new KinoAstar(nh, sdf_map_));
+   kinoastar_->init();
+   
+@@ -62,6 +66,9 @@ void ExplorationManager::initialize(ros::NodeHandle& nh)
+   gcopter_.reset(new Gcopter(gcopter_config, nh, sdf_map_, kinoastar_));
+   
+   ROS_INFO("[ExplorationManager] KinoAstar and GCopter initialized for real-world mode");
++#else
++  ROS_INFO("[ExplorationManager] Real-world trajectory planner disabled at build time");
++#endif
+ }
+ 
+ int ExplorationManager::planNextBestPoint(const Vector3d& pos, const double& yaw)
+@@ -657,6 +664,7 @@ void ExplorationManager::calcSemanticFrontierInfo(const vector<SemanticFrontier>
+ bool ExplorationManager::planTrajectory(
+     const Eigen::VectorXd& start, const Eigen::VectorXd& end, const Vector3d& ctrl)
+ {
++#ifdef APEXNAV_ENABLE_TRAJ_FSM
+   if (!gcopter_ || !kinoastar_) {
+     ROS_WARN_THROTTLE(1.0, "[ExplorationManager] GCopter or KinoAstar not initialized for real-world mode");
+     return false;
+@@ -681,6 +689,14 @@ bool ExplorationManager::planTrajectory(
+   }
+   
+   return false;
++#else
++  (void)start;
++  (void)end;
++  (void)ctrl;
++  ROS_WARN_THROTTLE(1.0,
++      "[ExplorationManager] Real-world trajectory planner disabled at build time");
++  return false;
++#endif
+ }
+ 
+ }  // namespace apexnav_planner
+diff --git a/src/planner/exploration_manager/src/exploration_node.cpp b/src/planner/exploration_manager/src/exploration_node.cpp
+index 1115a9e..0d2f5d6 100644
+--- a/src/planner/exploration_manager/src/exploration_node.cpp
++++ b/src/planner/exploration_manager/src/exploration_node.cpp
+@@ -1,6 +1,9 @@
+ #include <ros/ros.h>
+ #include <exploration_manager/exploration_fsm.h>
++
++#ifdef APEXNAV_ENABLE_TRAJ_FSM
+ #include <exploration_manager/exploration_fsm_traj.h>
++#endif
+ 
+ #include <exploration_manager/backward.hpp>
+ namespace backward {
+@@ -19,6 +22,7 @@ int main(int argc, char** argv)
+   nh.param("is_real_world", is_real_world, false);
+ 
+   if (is_real_world) {
++#ifdef APEXNAV_ENABLE_TRAJ_FSM
+     ROS_INFO("========================================");
+     ROS_INFO("  Starting in REAL WORLD mode");
+     ROS_INFO("========================================");
+@@ -26,6 +30,11 @@ int main(int argc, char** argv)
+     expl_fsm.init(nh);
+     ros::Duration(1.0).sleep();
+     ros::spin();
++#else
++    ROS_ERROR("Real-world trajectory mode was not built. Rebuild with "
++              "-DAPEXNAV_ENABLE_TRAJ_FSM=ON to enable it.");
++    return 1;
++#endif
+   }
+   else {
+     ROS_INFO("========================================");
+diff --git a/src/planner/path_searching/CMakeLists.txt b/src/planner/path_searching/CMakeLists.txt
+index b624396..de84a65 100755
+--- a/src/planner/path_searching/CMakeLists.txt
++++ b/src/planner/path_searching/CMakeLists.txt
+@@ -4,7 +4,7 @@ project(path_searching)
+ set(CMAKE_BUILD_TYPE "Release")
+ set(CMAKE_CXX_FLAGS "-std=c++11")
+ set(CMAKE_CXX_STANDARD 14)
+-set(CMAKE_CXX_FLAGS_RELEASE "-O3 -Wall")
++set(CMAKE_CXX_FLAGS_RELEASE "-O0 -g0 -Wall")
+ 
+ find_package(Eigen3 REQUIRED)
+ find_package(PCL 1.7 REQUIRED)
+diff --git a/src/planner/plan_env/CMakeLists.txt b/src/planner/plan_env/CMakeLists.txt
+index 864510f..91e4b45 100755
+--- a/src/planner/plan_env/CMakeLists.txt
++++ b/src/planner/plan_env/CMakeLists.txt
+@@ -4,7 +4,7 @@ project(plan_env)
+ set(CMAKE_BUILD_TYPE "Release")
+ set(CMAKE_CXX_FLAGS "-std=c++11")
+ set(CMAKE_CXX_STANDARD 14)
+-set(CMAKE_CXX_FLAGS_RELEASE "-O3 -Wall")
++set(CMAKE_CXX_FLAGS_RELEASE "-O0 -g0 -Wall")
+ 
+ find_package(OpenCV REQUIRED)
+ 
+diff --git a/src/planner/plan_env/src/object_map2d.cpp b/src/planner/plan_env/src/object_map2d.cpp
+index 94295c9..31d190d 100644
+--- a/src/planner/plan_env/src/object_map2d.cpp
++++ b/src/planner/plan_env/src/object_map2d.cpp
+@@ -222,7 +222,7 @@ void ObjectMap2D::updateObjectBestLabel(int obj_idx)
+   for (int label = 0; label < (int)objects_[obj_idx].clouds_.size(); label++) {
+     auto obs_sum = objects_[obj_idx].observation_cloud_sums_[label];
+     auto score = objects_[obj_idx].confidence_scores_[label];
+-    int func_score = obs_sum * score;  // Combined reliability metric
++    double func_score = obs_sum * score;  // Combined reliability metric
+ 
+     if (func_score > max_func_score) {
+       max_func_score = func_score;
+@@ -521,7 +521,7 @@ void ObjectMap2D::getAllConfidenceObjectClouds(
+ 
+   // Extract high-confidence object cells
+   for (auto object : objects_) {
+-    if (object.confidence_scores_[0] >= min_confidence_) {
++    if (object.best_label_ == 0 && object.confidence_scores_[0] >= min_confidence_) {
+       for (auto cell : object.good_cells_) {
+         pcl::PointXYZ point;
+         point.x = cell[0];
+@@ -540,11 +540,21 @@ void ObjectMap2D::getTopConfidenceObjectCloud(
+   top_object_clouds.clear();
+   vector<ObjectCluster> top_objects;
+ 
+-  // Confidence filtering strategy
+-  // TODO: May need logic adjustment for relaxed no limited_confidence conditions
++  (void)extreme;
++
++  // Confidence filtering strategy.
++  // Paper logic: only clusters whose best-matching label is the target are
++  // eligible for object pursuit. Below-threshold target clusters are treated
++  // as suspected targets and only considered after frontiers are exhausted.
+   if (!limited_confidence) {
+-    // Include all objects without confidence filtering
+-    for (auto object : objects_) top_objects.push_back(object);
++    // Include only suspected target clusters.
++    for (auto object : objects_) {
++      if (object.best_label_ != 0)
++        continue;
++      if (object.confidence_scores_[0] <= 0.01 || object.good_cells_.empty())
++        continue;
++      top_objects.push_back(object);
++    }
+ 
+     // Sort by confidence score in descending order
+     std::sort(
+@@ -569,43 +579,11 @@ void ObjectMap2D::getTopConfidenceObjectCloud(
+       }
+       top_object_clouds.push_back(top_object_cloud);
+     }
+-
+-    // Fallback for extreme mode when no high-confidence objects exist
+-    if (extreme && top_object_clouds.empty()) {
+-      pcl::shared_ptr<pcl::PointCloud<pcl::PointXYZ>> others_object_cloud;
+-      others_object_cloud.reset(new pcl::PointCloud<pcl::PointXYZ>());
+-
+-      // Include all object cells regardless of confidence
+-      for (auto object : objects_) {
+-        for (auto cell : object.cells_) {
+-          pcl::PointXYZ point;
+-          point.x = cell(0);
+-          point.y = cell(1);
+-          point.z = 0;
+-          others_object_cloud->push_back(point);
+-        }
+-      }
+-      top_object_clouds.push_back(others_object_cloud);
+-    }
+   }
+   else {
+-    // Apply confidence filtering with functional scoring
++    // Include only reliable target clusters.
+     for (auto object : objects_) {
+-      int max_func_score = 0, best_label = -1;
+-
+-      // Find best label using functional score (observation count * confidence)
+-      for (int label = 0; label < (int)object.clouds_.size(); label++) {
+-        auto obs_sum = object.observation_cloud_sums_[label];
+-        auto score = object.confidence_scores_[label];
+-        int func_score = obs_sum * score;
+-        if (func_score > max_func_score) {
+-          max_func_score = func_score;
+-          best_label = label;
+-        }
+-      }
+-
+-      // Include only high-confidence objects with primary label (0)
+-      if (best_label == 0 && isConfidenceObject(object))
++      if (object.best_label_ == 0 && isConfidenceObject(object))
+         top_objects.push_back(object);
+     }
+ 
+@@ -639,4 +617,4 @@ bool ObjectMap2D::isConfidenceObject(const ObjectCluster& obj)
+   return false;
+ }
+ 
+-}  // namespace apexnav_planner
+\ No newline at end of file
++}  // namespace apexnav_planner
+diff --git a/src/planner/trajectory_manager/CMakeLists.txt b/src/planner/trajectory_manager/CMakeLists.txt
+index af8fbe0..582cebf 100644
+--- a/src/planner/trajectory_manager/CMakeLists.txt
++++ b/src/planner/trajectory_manager/CMakeLists.txt
+@@ -3,7 +3,7 @@ project(trajectory_manager)
+ 
+ set(CMAKE_CXX_FLAGS "-std=c++14")
+ set(CMAKE_BUILD_TYPE "Release")
+-set(CMAKE_CXX_FLAGS_RELEASE "-O3 -Wall -fPIC")
++set(CMAKE_CXX_FLAGS_RELEASE "-O0 -g0 -Wall -fPIC")
+ 
+ find_package(catkin REQUIRED COMPONENTS
+   geometry_msgs
+diff --git a/src/planner/trajectory_manager/src/optimizer.cpp b/src/planner/trajectory_manager/src/optimizer.cpp
+index f17d702..864548c 100644
+--- a/src/planner/trajectory_manager/src/optimizer.cpp
++++ b/src/planner/trajectory_manager/src/optimizer.cpp
+@@ -1 +1,3 @@
+-#include "trajectory_manager/optimizer.h"
+\ No newline at end of file
++namespace apexnav_planner {
++void trajectoryManagerLinkAnchor() {}
++}  // namespace apexnav_planner
+diff --git a/src/planner/utils/lkh_mtsp_solver/CMakeLists.txt b/src/planner/utils/lkh_mtsp_solver/CMakeLists.txt
+index e178bf7..99777e5 100644
+--- a/src/planner/utils/lkh_mtsp_solver/CMakeLists.txt
++++ b/src/planner/utils/lkh_mtsp_solver/CMakeLists.txt
+@@ -3,7 +3,7 @@ project(lkh_mtsp_solver)
+ 
+ set(CMAKE_BUILD_TYPE "Release")
+ set(CMAKE_CXX_FLAGS "-std=c++11")
+-set(CMAKE_CXX_FLAGS "-O3 -Wall")
++set(CMAKE_CXX_FLAGS "-O0 -g0 -Wall")
+ set(CMAKE_C_FLAGS "-fcommon")
+ 
+ find_package(catkin REQUIRED COMPONENTS
+@@ -49,4 +49,4 @@ add_executable( tsp_node
+   src2/tsp_node.cpp
+ )
+ add_dependencies(tsp_node ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
+-target_link_libraries(tsp_node ${catkin_LIBRARIES} lkh_mtsp_solver -lm)
+\ No newline at end of file
++target_link_libraries(tsp_node ${catkin_LIBRARIES} lkh_mtsp_solver -lm)
+diff --git a/src/planner/utils/vis_utils/CMakeLists.txt b/src/planner/utils/vis_utils/CMakeLists.txt
+index ae0ea28..32a6c9f 100755
+--- a/src/planner/utils/vis_utils/CMakeLists.txt
++++ b/src/planner/utils/vis_utils/CMakeLists.txt
+@@ -4,7 +4,7 @@ project(vis_utils)
+ set(CMAKE_BUILD_TYPE "Release")
+ set(CMAKE_CXX_FLAGS "-std=c++11")
+ set(CMAKE_CXX_STANDARD 14)
+-set(CMAKE_CXX_FLAGS_RELEASE "-O3 -Wall")
++set(CMAKE_CXX_FLAGS_RELEASE "-O0 -g0 -Wall")
+ 
+ find_package(catkin REQUIRED COMPONENTS
+     path_searching
+@@ -38,4 +38,4 @@ add_library(vis_utils
+ )
+ target_link_libraries(vis_utils
+     ${catkin_LIBRARIES}
+-)
+\ No newline at end of file
++)
+diff --git a/vlm/detector/grounding_dino.py b/vlm/detector/grounding_dino.py
+index c45776f..b4fc38b 100644
+--- a/vlm/detector/grounding_dino.py
++++ b/vlm/detector/grounding_dino.py
+@@ -1,3 +1,4 @@
++import os
+ from typing import Optional
+ 
+ import numpy as np
+@@ -81,7 +82,9 @@ class GroundingDINO:
+ 
+ 
+ class GroundingDINOClient:
+-    def __init__(self, port: int = 12181):
++    def __init__(self, port: Optional[int] = None):
++        if port is None:
++            port = int(os.environ.get("GDINO_PORT", "12181"))
+         self.url = f"http://localhost:{port}/gdino"
+ 
+     def predict(
+diff --git a/vlm/detector/yolov7.py b/vlm/detector/yolov7.py
+index 0651168..a645c36 100644
+--- a/vlm/detector/yolov7.py
++++ b/vlm/detector/yolov7.py
+@@ -1,3 +1,4 @@
++import os
+ import sys
+ from typing import List, Optional
+ 
+@@ -117,7 +118,9 @@ class YOLOv7:
+ 
+ 
+ class YOLOv7Client:
+-    def __init__(self, port: int = 12184):
++    def __init__(self, port: Optional[int] = None):
++        if port is None:
++            port = int(os.environ.get("YOLOV7_PORT", "12184"))
+         self.url = f"http://localhost:{port}/yolov7"
+ 
+     def predict(
+diff --git a/vlm/itm/blip2itm.py b/vlm/itm/blip2itm.py
+index 6985788..39ff593 100644
+--- a/vlm/itm/blip2itm.py
++++ b/vlm/itm/blip2itm.py
+@@ -1,3 +1,4 @@
++import os
+ from typing import Any, Optional
+ 
+ import numpy as np
+@@ -67,7 +68,9 @@ class BLIP2ITM:
+ 
+ 
+ class BLIP2ITMClient:
+-    def __init__(self, port: int = 12182):
++    def __init__(self, port: Optional[int] = None):
++        if port is None:
++            port = int(os.environ.get("BLIP2ITM_PORT", "12182"))
+         self.url = f"http://localhost:{port}/blip2itm"
+ 
+     def cosine(self, image: np.ndarray, txt: str) -> float:
+diff --git a/vlm/segmentor/sam.py b/vlm/segmentor/sam.py
+index 1883258..e92588a 100644
+--- a/vlm/segmentor/sam.py
++++ b/vlm/segmentor/sam.py
+@@ -61,7 +61,9 @@ class MobileSAM:
+ 
+ 
+ class MobileSAMClient:
+-    def __init__(self, port: int = 12183):
++    def __init__(self, port: Optional[int] = None):
++        if port is None:
++            port = int(os.environ.get("MOBILE_SAM_PORT", "12183"))
+         self.url = f"http://localhost:{port}/mobile_sam"
+ 
+     def segment_bbox(self, image: np.ndarray, bbox: List[int]) -> np.ndarray:
+diff --git a/vlm/utils/get_itm_message.py b/vlm/utils/get_itm_message.py
+index 61a900f..d95349d 100644
+--- a/vlm/utils/get_itm_message.py
++++ b/vlm/utils/get_itm_message.py
+@@ -2,7 +2,7 @@ import cv2
+ import numpy as np
+ from vlm.itm.blip2itm import BLIP2ITMClient
+ 
+-itmclient = BLIP2ITMClient(port=12182)
++itmclient = BLIP2ITMClient()
+ 
+ def get_itm_message(rgb_image, label):
+     txt = f"Is there a {label} in the image?"
+@@ -16,4 +16,4 @@ def get_itm_message_cosine(rgb_image, label, room):
+     else:
+         txt = f"Seems like there is a {label} ahead?"
+     cosine = itmclient.cosine(rgb_image, txt)
+-    return cosine
+\ No newline at end of file
++    return cosine
+diff --git a/vlm/utils/get_object_utils.py b/vlm/utils/get_object_utils.py
+index fb4fea8..a7dfbac 100644
+--- a/vlm/utils/get_object_utils.py
++++ b/vlm/utils/get_object_utils.py
+@@ -7,10 +7,10 @@ from vlm.detector.grounding_dino import GroundingDINOClient
+ from vlm.itm.blip2itm import BLIP2ITMClient
+ from vlm.utils.get_itm_message import get_itm_message
+ 
+-yolov7_detector = YOLOv7Client(port=12184)
+-blip2_itm = BLIP2ITMClient(port=12182)
+-sam_segmentor = MobileSAMClient(port=12183)
+-dino_detector = GroundingDINOClient(port=12181)
++yolov7_detector = YOLOv7Client()
++blip2_itm = BLIP2ITMClient()
++sam_segmentor = MobileSAMClient()
++dino_detector = GroundingDINOClient()
+ 
+ 
+ def get_segmentation(segmented_img, idx, detections, img, label, score, color):
+@@ -197,4 +197,3 @@ def crop_and_expand_box(img, detections, idx, expand_pixels=0.4):
+     img_detected = img[y_min:y_max+1, x_min:x_max+1]
+ 
+     return img_detected
+-

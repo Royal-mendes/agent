@@ -1,0 +1,2 @@
+episode_index,target,result,success_pct,spl_pct,soft_spl_pct,distance_to_goal,steps,rc,duration_sec,log
+25,couch,success,100.00,75.86,75.37,0.0484,119,0,213,/root/autodl-tmp/ApexNav/agent-Apexnav/repro/per_episode/agent_snapshot_ep25_20260427_220120/logs/ep_0025.log

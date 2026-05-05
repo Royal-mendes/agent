@@ -1,0 +1,30 @@
+ M basic_utils/failure_check/failure_check.py
+ M habitat2ros/habitat_publisher.py
+ M habitat_evaluation.py
+ M src/planner/exploration_manager/CMakeLists.txt
+ M src/planner/exploration_manager/include/exploration_manager/exploration_data.h
+ M src/planner/exploration_manager/include/exploration_manager/exploration_manager.h
+ M src/planner/exploration_manager/src/exploration_fsm.cpp
+ M src/planner/exploration_manager/src/exploration_fsm_traj.cpp
+ M src/planner/exploration_manager/src/exploration_manager.cpp
+ M src/planner/exploration_manager/src/exploration_node.cpp
+ M src/planner/path_searching/CMakeLists.txt
+ M src/planner/plan_env/CMakeLists.txt
+ M src/planner/plan_env/src/object_map2d.cpp
+ M src/planner/trajectory_manager/CMakeLists.txt
+ M src/planner/trajectory_manager/src/optimizer.cpp
+ M src/planner/utils/lkh_mtsp_solver/CMakeLists.txt
+ M src/planner/utils/vis_utils/CMakeLists.txt
+ M vlm/detector/grounding_dino.py
+ M vlm/detector/yolov7.py
+ M vlm/itm/blip2itm.py
+ M vlm/segmentor/sam.py
+ M vlm/utils/get_itm_message.py
+ M vlm/utils/get_object_utils.py
+?? apexnav_paper.pdf
+?? exploration_fsm.cpp
+?? exploration_fsm_traj.cpp
+?? failure_check.py
+?? paper_src/
+?? repro/
+?? wheelhouse/
