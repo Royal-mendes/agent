@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 from typing import Any, Optional
 
 from agent.schemas import AgentConfig
@@ -32,13 +33,16 @@ class OpenAICompatibleVLMProvider:
         temperature: float = 0.0,
         force_json_response_format: bool = False,
         max_tokens: Optional[int] = None,
+        max_input_chars: Optional[int] = None,
         extra_body: Optional[dict] = None,
         client: Optional[Any] = None,
     ) -> None:
         self.model = model or DEFAULT_OPENAI_COMPATIBLE_MODEL
         self.temperature = temperature
         self.force_json_response_format = force_json_response_format
+        self.timeout_seconds = timeout_seconds
         self.max_tokens = max_tokens
+        self.max_input_chars = max_input_chars
         self.extra_body = extra_body or {}
         if client is not None:
             self.client = client
@@ -51,7 +55,7 @@ class OpenAICompatibleVLMProvider:
         except ModuleNotFoundError as exc:
             raise VLMProviderError("openai package is not installed in this environment.") from exc
 
-        kwargs = {"api_key": api_key, "timeout": timeout_seconds}
+        kwargs = {"api_key": api_key, "timeout": timeout_seconds, "max_retries": 0}
         if base_url:
             kwargs["base_url"] = base_url
         self.client = OpenAI(**kwargs)
@@ -63,6 +67,7 @@ class OpenAICompatibleVLMProvider:
         image_data_url: Optional[str] = None,
         image_data_urls: Optional[list[str]] = None,
     ) -> str:
+        user_prompt = self._fit_user_prompt(user_prompt)
         user_content: Any = user_prompt
         image_urls = list(image_data_urls or [])
         if image_data_url:
@@ -79,6 +84,7 @@ class OpenAICompatibleVLMProvider:
                 {"role": "user", "content": user_content},
             ],
             "temperature": self.temperature,
+            "timeout": self.timeout_seconds,
         }
         if self.max_tokens is not None:
             kwargs["max_tokens"] = self.max_tokens
@@ -88,6 +94,18 @@ class OpenAICompatibleVLMProvider:
             kwargs["response_format"] = {"type": "json_object"}
         response = self.client.chat.completions.create(**kwargs)
         return response.choices[0].message.content or ""
+
+    def _fit_user_prompt(self, user_prompt: str) -> str:
+        """Bound local prompt size while preserving task constraints and output schema."""
+        limit = self.max_input_chars
+        if not limit or len(user_prompt) <= limit:
+            return user_prompt
+        marker = "\n...[middle of prompt truncated to fit local VLM context]...\n"
+        head = max(1000, limit // 3)
+        tail = max(1000, limit - head - len(marker))
+        if head + tail + len(marker) >= len(user_prompt):
+            return user_prompt
+        return user_prompt[:head] + marker + user_prompt[-tail:]
 
 
 def build_vlm_provider(cfg: AgentConfig) -> Optional[OpenAICompatibleVLMProvider]:
@@ -106,16 +124,58 @@ def build_vlm_provider(cfg: AgentConfig) -> Optional[OpenAICompatibleVLMProvider
         base_url = cfg.vlm_base_url or os.environ.get("LOCAL_VLM_BASE_URL") or DEFAULT_LOCAL_VLM_BASE_URL
         model = cfg.vlm_model or os.environ.get("LOCAL_VLM_MODEL") or DEFAULT_LOCAL_VLM_MODEL
 
-    max_tokens = int(os.environ.get("LOCAL_VLM_MAX_TOKENS", "512")) if provider == "local" else None
-    extra_body = {"repetition_penalty": 1.05} if provider == "local" else None
+    if provider == "local":
+        max_tokens = int(os.environ.get("LOCAL_VLM_MAX_TOKENS", "512"))
+        max_input_chars = int(os.environ.get("LOCAL_VLM_MAX_INPUT_CHARS", "9000"))
+        extra_body = {"repetition_penalty": 1.05}
+        extra_body.update(_json_env("LOCAL_VLM_EXTRA_BODY_JSON"))
+    else:
+        max_tokens = _optional_int_env("VLM_MAX_TOKENS")
+        max_input_chars = _optional_int_env("VLM_MAX_INPUT_CHARS")
+        extra_body = {}
+    extra_body.update(_json_env("VLM_EXTRA_BODY_JSON"))
 
+    timeout_seconds = _effective_timeout_seconds(cfg.vlm_timeout_seconds)
     return OpenAICompatibleVLMProvider(
         model=model,
         api_key=api_key,
         base_url=base_url,
-        timeout_seconds=cfg.vlm_timeout_seconds,
+        timeout_seconds=timeout_seconds,
         temperature=cfg.vlm_temperature,
         force_json_response_format=cfg.vlm_force_json_response_format,
         max_tokens=max_tokens,
-        extra_body=extra_body,
+        max_input_chars=max_input_chars,
+        extra_body=extra_body or None,
     )
+
+
+def _optional_int_env(name: str) -> Optional[int]:
+    value = os.environ.get(name)
+    if value is None or value == "":
+        return None
+    return int(value)
+
+
+def _effective_timeout_seconds(configured: float) -> float:
+    try:
+        timeout = float(configured)
+    except (TypeError, ValueError):
+        timeout = 30.0
+    try:
+        cap = float(os.environ.get("VLM_HARD_TIMEOUT_SECONDS", "45"))
+    except ValueError:
+        cap = 45.0
+    return max(1.0, min(timeout, cap))
+
+
+def _json_env(name: str) -> dict:
+    value = os.environ.get(name)
+    if not value:
+        return {}
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise VLMProviderError(f"{name} must be valid JSON.") from exc
+    if not isinstance(parsed, dict):
+        raise VLMProviderError(f"{name} must decode to a JSON object.")
+    return parsed

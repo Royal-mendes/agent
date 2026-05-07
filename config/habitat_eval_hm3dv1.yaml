@@ -61,14 +61,14 @@ video_output_path: videos/test_hm3dv1_{split}
 test_epi_num: -1
 reflective_agent:
   enable_reflective_agent: true
-  python_executable: /root/miniconda3/envs/apexnav/bin/python
-  project_root: /root/autodl-tmp/ApexNav/agent-Apexnav
+  python_executable: python
+  project_root: ""
   enable_vlm_skill_selector: true
   vlm_provider: openai
   vlm_model: gpt-5.5
   vlm_model_env: OPENAI_MODEL
   vlm_api_key: null
-  vlm_base_url: https://ai.happyclaw.pro/v1
+  vlm_base_url: ""
   vlm_base_url_env: OPENAI_BASE_URL
   vlm_api_key_env: OPENAI_API_KEY
   vlm_timeout_seconds: 30.0

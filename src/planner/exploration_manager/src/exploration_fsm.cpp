@@ -12,6 +12,7 @@
 #include <limits>
 #include <sstream>
 #include <utility>
+#include <vector>
 
 namespace {
 std::unique_ptr<apexnav_planner::ReflectiveAgentBridge> g_reflective_agent_bridge;
@@ -38,6 +39,32 @@ bool g_last_reflective_validator_accepted = false;
 std::string g_last_reflective_rejection_reason;
 std::string g_last_stop_action_source = "none";
 
+struct ReflectiveBestPointCandidate {
+  Eigen::Vector2d point = Eigen::Vector2d::Zero();
+  double evidence_score = 0.0;
+  double target_confidence = 0.0;
+  int target_views = 0;
+  double semantic_score = 0.0;
+  double frontier_score = 0.0;
+  int frontier_count = 0;
+  int timestep = -1;
+  std::string reason = "unavailable";
+};
+
+std::vector<ReflectiveBestPointCandidate> g_reflective_best_point_history;
+Eigen::Vector2d g_reflective_best_known_point = Eigen::Vector2d::Zero();
+bool g_reflective_best_known_point_valid = false;
+double g_reflective_best_known_score = -std::numeric_limits<double>::infinity();
+double g_reflective_best_known_evidence_score = 0.0;
+double g_reflective_best_known_distance_to_current = -1.0;
+double g_reflective_best_known_target_confidence = 0.0;
+int g_reflective_best_known_target_views = 0;
+double g_reflective_best_known_semantic_score = 0.0;
+double g_reflective_best_known_frontier_score = 0.0;
+int g_reflective_best_known_frontier_count = 0;
+int g_reflective_best_known_timestep = -1;
+std::string g_reflective_best_known_reason = "unavailable";
+
 constexpr double kReflectiveCommittedTargetReachDistance = 0.5;
 int g_min_commitment_steps_for_explore = 10;
 int g_max_commitment_steps_semantic = 80;
@@ -51,6 +78,11 @@ double g_structural_frontier_count_change_ratio = 0.3;
 double g_semantic_frontier_shift_ratio = 0.15;
 double g_target_verify_threshold = 0.65;
 double g_target_stop_threshold = 0.75;
+double g_best_point_distance_penalty = 10.0;
+double g_best_point_min_return_utility = 15.0;
+double g_best_point_min_separation = 0.5;
+double g_best_point_min_return_distance = 0.5;
+int g_best_point_max_history = 16;
 bool g_enable_semantic_map_observation = true;
 bool g_require_multiview_before_stop = true;
 int g_semantic_map_max_width = 320;
@@ -88,8 +120,23 @@ void resetReflectiveAgentCommitment()
   g_last_reflective_validator_accepted = false;
   g_last_reflective_rejection_reason.clear();
   g_last_stop_action_source = "none";
+  g_reflective_best_point_history.clear();
+  g_reflective_best_known_point = Eigen::Vector2d::Zero();
+  g_reflective_best_known_point_valid = false;
+  g_reflective_best_known_score = -std::numeric_limits<double>::infinity();
+  g_reflective_best_known_evidence_score = 0.0;
+  g_reflective_best_known_distance_to_current = -1.0;
+  g_reflective_best_known_target_confidence = 0.0;
+  g_reflective_best_known_target_views = 0;
+  g_reflective_best_known_semantic_score = 0.0;
+  g_reflective_best_known_frontier_score = 0.0;
+  g_reflective_best_known_frontier_count = 0;
+  g_reflective_best_known_timestep = -1;
+  g_reflective_best_known_reason = "unavailable";
   ros::param::set("/reflective_agent/last_stop_action_source", "none");
   ros::param::set("/reflective_agent/last_stop_invalid_active_stop", false);
+  ros::param::set("/reflective_agent/best_known_point_valid", false);
+  ros::param::set("/reflective_agent/best_known_point_distance_to_current", -1.0);
 }
 
 bool isExplorationCommitment(const std::string& skill)
@@ -108,7 +155,7 @@ int maxCommitmentStepsForSkill(const std::string& skill)
     return g_max_commitment_steps_semantic;
   if (skill == "GEOMETRIC_EXPLORE")
     return g_max_commitment_steps_geometric;
-  if (skill == "RECOVER_FROM_STUCK")
+  if (skill == "RECOVER_FROM_STUCK" || skill == "RETURN_TO_BEST_KNOWN_POINT")
     return g_max_commitment_steps_recovery;
   return g_max_commitment_steps_fallback;
 }
@@ -120,6 +167,184 @@ bool frontierCountRatioChanged(int previous_count, int current_count)
   const int denom = std::max(1, previous_count);
   const double ratio = std::abs(current_count - previous_count) / static_cast<double>(denom);
   return ratio >= g_structural_frontier_count_change_ratio;
+}
+
+double localSemanticScore(
+    const apexnav_planner::ExplorationManager::Ptr& expl_manager,
+    const Eigen::Vector2d& current_pos)
+{
+  if (!expl_manager || !expl_manager->sdf_map_ || !expl_manager->sdf_map_->value_map_)
+    return 0.0;
+  Eigen::Vector2i idx;
+  expl_manager->sdf_map_->posToIndex(current_pos, idx);
+  return expl_manager->sdf_map_->value_map_->getValue(idx);
+}
+
+void publishReflectiveBestKnownPoint()
+{
+  ros::param::set("/reflective_agent/best_known_point_valid",
+      g_reflective_best_known_point_valid);
+  ros::param::set("/reflective_agent/best_known_point_x", g_reflective_best_known_point(0));
+  ros::param::set("/reflective_agent/best_known_point_y", g_reflective_best_known_point(1));
+  ros::param::set("/reflective_agent/best_known_point_score", g_reflective_best_known_score);
+  ros::param::set("/reflective_agent/best_known_point_evidence_score",
+      g_reflective_best_known_evidence_score);
+  ros::param::set("/reflective_agent/best_known_point_distance_to_current",
+      g_reflective_best_known_distance_to_current);
+  ros::param::set("/reflective_agent/best_known_point_timestep",
+      g_reflective_best_known_timestep);
+  ros::param::set("/reflective_agent/best_known_point_signal", g_reflective_best_known_reason);
+}
+
+void clearPublishedBestKnownPoint()
+{
+  g_reflective_best_known_point = Eigen::Vector2d::Zero();
+  g_reflective_best_known_point_valid = false;
+  g_reflective_best_known_score = -std::numeric_limits<double>::infinity();
+  g_reflective_best_known_evidence_score = 0.0;
+  g_reflective_best_known_distance_to_current = -1.0;
+  g_reflective_best_known_target_confidence = 0.0;
+  g_reflective_best_known_target_views = 0;
+  g_reflective_best_known_semantic_score = 0.0;
+  g_reflective_best_known_frontier_score = 0.0;
+  g_reflective_best_known_frontier_count = 0;
+  g_reflective_best_known_timestep = -1;
+  g_reflective_best_known_reason = "no_return_candidate";
+  publishReflectiveBestKnownPoint();
+}
+
+ReflectiveBestPointCandidate makeBestPointCandidate(
+    const apexnav_planner::ExplorationManager::Ptr& expl_manager,
+    const Eigen::Vector2d& current_pos,
+    int timestep,
+    int frontier_count,
+    double best_frontier_score,
+    int target_candidate_count,
+    double max_target_confidence,
+    int max_target_views,
+    bool stuck_signal)
+{
+  ReflectiveBestPointCandidate candidate;
+  candidate.point = current_pos;
+  candidate.timestep = timestep;
+  candidate.target_confidence = max_target_confidence;
+  candidate.target_views = max_target_views;
+  candidate.frontier_count = frontier_count;
+  const double semantic_score = localSemanticScore(expl_manager, current_pos);
+  const double frontier_score = std::max(0.0, best_frontier_score);
+  double score = semantic_score * 20.0 + frontier_score * 10.0 +
+      std::min(frontier_count, 20) * 0.2;
+  std::string reason = "semantic_or_frontier_evidence";
+
+  if (target_candidate_count > 0) {
+    score += 100.0 + max_target_confidence * 100.0 + std::min(max_target_views, 5) * 5.0;
+    reason = "target_candidate_evidence";
+  }
+  if (stuck_signal) {
+    score -= 25.0;
+    reason += "_with_stuck_penalty";
+  }
+
+  candidate.evidence_score = score;
+  candidate.semantic_score = semantic_score;
+  candidate.frontier_score = frontier_score;
+  candidate.reason = reason;
+  return candidate;
+}
+
+void addBestPointCandidate(const ReflectiveBestPointCandidate& candidate)
+{
+  for (auto& existing : g_reflective_best_point_history) {
+    if ((existing.point - candidate.point).norm() > g_best_point_min_separation)
+      continue;
+    if (candidate.evidence_score > existing.evidence_score) {
+      existing = candidate;
+    }
+    return;
+  }
+
+  g_reflective_best_point_history.push_back(candidate);
+  if (static_cast<int>(g_reflective_best_point_history.size()) <= g_best_point_max_history)
+    return;
+
+  std::sort(g_reflective_best_point_history.begin(), g_reflective_best_point_history.end(),
+      [](const ReflectiveBestPointCandidate& a, const ReflectiveBestPointCandidate& b) {
+        return a.evidence_score > b.evidence_score;
+      });
+  g_reflective_best_point_history.resize(std::max(1, g_best_point_max_history));
+}
+
+void selectBestReturnPointForCurrentPosition(
+    const Eigen::Vector2d& current_pos, double current_evidence_score)
+{
+  bool found = false;
+  ReflectiveBestPointCandidate best_candidate;
+  double best_return_utility = -std::numeric_limits<double>::infinity();
+  double best_distance = -1.0;
+
+  for (const auto& candidate : g_reflective_best_point_history) {
+    const double distance = (candidate.point - current_pos).norm();
+    if (distance < g_best_point_min_return_distance)
+      continue;
+    const double return_utility = candidate.evidence_score - current_evidence_score -
+        g_best_point_distance_penalty * distance;
+    if (!found || return_utility > best_return_utility) {
+      found = true;
+      best_candidate = candidate;
+      best_return_utility = return_utility;
+      best_distance = distance;
+    }
+  }
+
+  if (!found || best_return_utility < g_best_point_min_return_utility) {
+    clearPublishedBestKnownPoint();
+    return;
+  }
+
+  g_reflective_best_known_point = best_candidate.point;
+  g_reflective_best_known_point_valid = true;
+  g_reflective_best_known_score = best_return_utility;
+  g_reflective_best_known_evidence_score = best_candidate.evidence_score;
+  g_reflective_best_known_distance_to_current = best_distance;
+  g_reflective_best_known_target_confidence = best_candidate.target_confidence;
+  g_reflective_best_known_target_views = best_candidate.target_views;
+  g_reflective_best_known_semantic_score = best_candidate.semantic_score;
+  g_reflective_best_known_frontier_score = best_candidate.frontier_score;
+  g_reflective_best_known_frontier_count = best_candidate.frontier_count;
+  g_reflective_best_known_timestep = best_candidate.timestep;
+  g_reflective_best_known_reason = best_candidate.reason + "_minus_distance_cost";
+  publishReflectiveBestKnownPoint();
+}
+
+void updateReflectiveBestKnownPoint(
+    const apexnav_planner::ExplorationManager::Ptr& expl_manager,
+    const Eigen::Vector2d& current_pos,
+    int timestep,
+    int frontier_count,
+    double best_frontier_score,
+    int target_candidate_count,
+    double max_target_confidence,
+    int max_target_views,
+    bool stuck_signal)
+{
+  const auto current_candidate = makeBestPointCandidate(expl_manager, current_pos, timestep,
+      frontier_count, best_frontier_score, target_candidate_count, max_target_confidence,
+      max_target_views, stuck_signal);
+  addBestPointCandidate(current_candidate);
+  selectBestReturnPointForCurrentPosition(current_pos, current_candidate.evidence_score);
+  if (g_reflective_best_known_point_valid) {
+    ROS_WARN_THROTTLE(5.0,
+        "[Reflective BestPoint] return_candidate=(%.2f, %.2f) utility=%.3f "
+        "evidence=%.3f distance=%.2f target_conf=%.3f views=%d local_sem=%.3f "
+        "frontier_sem=%.3f frontiers=%d signal=%s step=%d",
+        g_reflective_best_known_point(0), g_reflective_best_known_point(1),
+        g_reflective_best_known_score, g_reflective_best_known_evidence_score,
+        g_reflective_best_known_distance_to_current,
+        g_reflective_best_known_target_confidence, g_reflective_best_known_target_views,
+        g_reflective_best_known_semantic_score, g_reflective_best_known_frontier_score,
+        g_reflective_best_known_frontier_count, g_reflective_best_known_reason.c_str(),
+        timestep);
+  }
 }
 
 void loadReflectiveCommitmentParams(ros::NodeHandle& nh)
@@ -137,6 +362,13 @@ void loadReflectiveCommitmentParams(ros::NodeHandle& nh)
   nh.param("reflective_agent/semantic_frontier_shift_ratio", g_semantic_frontier_shift_ratio, 0.15);
   nh.param("reflective_agent/target_verify_threshold", g_target_verify_threshold, 0.65);
   nh.param("reflective_agent/target_stop_threshold", g_target_stop_threshold, 0.75);
+  nh.param("reflective_agent/best_point_distance_penalty", g_best_point_distance_penalty, 10.0);
+  nh.param("reflective_agent/best_point_min_return_utility",
+      g_best_point_min_return_utility, 15.0);
+  nh.param("reflective_agent/best_point_min_separation", g_best_point_min_separation, 0.5);
+  nh.param("reflective_agent/best_point_min_return_distance",
+      g_best_point_min_return_distance, 0.5);
+  nh.param("reflective_agent/best_point_max_history", g_best_point_max_history, 16);
   nh.param("reflective_agent/require_multiview_before_stop", g_require_multiview_before_stop, true);
   ros::param::param("/reflective_agent/enable_semantic_map_observation",
       g_enable_semantic_map_observation, true);
@@ -784,6 +1016,9 @@ int ExplorationFSM::callActionPlanner()
         frontier_availability_changed || frontier_ratio_changed || dormant_replan_requested ||
         reflective_target_reached_signal_active || frontier_change_stably_present ||
         semantic_frontier_shifted || committed_frontier_failed;
+    updateReflectiveBestKnownPoint(expl_manager_, current_pos, g_reflective_decision_count,
+        frontier_count, current_semantic_frontier.second, target_candidate_count,
+        max_target_confidence, max_target_views, reflective_stuck_signal_active);
 
     if (target_candidate_count > 0)
       ++g_target_presence_streak;
@@ -874,6 +1109,21 @@ int ExplorationFSM::callActionPlanner()
       nh_.getParam("/reflective_agent/current_detected_landmarks",
           reflective_state.detected_objects_json);
       nh_.getParam("/reflective_agent/current_gt_feedback", reflective_state.gt_feedback_json);
+      reflective_state.best_known_point_valid = g_reflective_best_known_point_valid;
+      reflective_state.best_known_point = g_reflective_best_known_point;
+      reflective_state.best_known_score = g_reflective_best_known_score;
+      reflective_state.best_known_evidence_score =
+          g_reflective_best_known_evidence_score;
+      reflective_state.best_known_distance_to_current =
+          g_reflective_best_known_distance_to_current;
+      reflective_state.best_known_target_confidence =
+          g_reflective_best_known_target_confidence;
+      reflective_state.best_known_target_views = g_reflective_best_known_target_views;
+      reflective_state.best_known_semantic_score = g_reflective_best_known_semantic_score;
+      reflective_state.best_known_frontier_score = g_reflective_best_known_frontier_score;
+      reflective_state.best_known_frontier_count = g_reflective_best_known_frontier_count;
+      reflective_state.best_known_timestep = g_reflective_best_known_timestep;
+      reflective_state.best_known_reason = g_reflective_best_known_reason;
       if (reflective_stuck_signal_active)
         reflective_state.recent_failures.push_back("planner_stuck");
       if (frontier_count == 0)

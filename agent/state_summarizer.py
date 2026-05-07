@@ -202,6 +202,10 @@ class StateSummarizer:
                 history.get("collision_count", self._get(context, "collision_count", 0)) or 0
             ),
             "steps_left": history.get("steps_left", self._get(context, "steps_left", None)),
+            "best_known_point": history.get(
+                "best_known_point",
+                self._get(context, "best_known_point", {"available": False}),
+            ),
         }
 
     def _default_observation_summary(self, state: Dict[str, Any]) -> str:

@@ -18,6 +18,7 @@ class SkillName(str, Enum):
     GEOMETRIC_EXPLORE = "GEOMETRIC_EXPLORE"
     VERIFY_TARGET = "VERIFY_TARGET"
     NAVIGATE_TO_CONFIRMED_TARGET = "NAVIGATE_TO_CONFIRMED_TARGET"
+    RETURN_TO_BEST_KNOWN_POINT = "RETURN_TO_BEST_KNOWN_POINT"
     RECOVER_FROM_STUCK = "RECOVER_FROM_STUCK"
     FOLLOW_APEXNAV_PROPOSAL = "FOLLOW_APEXNAV_PROPOSAL"
     FALLBACK_APEXNAV = "FALLBACK_APEXNAV"
@@ -94,6 +95,8 @@ class AgentConfig:
 
     enable_reflection_memory: bool = True
     enable_episode_reflection: bool = True
+    enable_vlm_episode_reflection: bool = True
+    vlm_episode_reflection_max_decisions: int = 12
     memory_path: str = "data/reflection_memory.jsonl"
     memory_read_mode: str = "enabled"
     memory_write_mode: str = "all"
@@ -133,6 +136,8 @@ class AgentConfig:
     enable_runtime_gt_progress_learning: bool = True
     enable_gt_trajectory_learning: bool = True
     enable_vlm_gt_trajectory_reflection: bool = True
+    enable_online_gt_deviation_reflection: bool = True
+    online_gt_deviation_reflection_debounce_steps: int = 5
     gt_progress_min_delta: float = 0.25
     gt_path_deviation_threshold: float = 1.5
     gt_path_deviation_growth_threshold: float = 0.5
@@ -148,6 +153,7 @@ class AgentConfig:
 
     disable_failure_taxonomy: bool = False
     disable_recover_from_stuck: bool = False
+    disable_verify_target: bool = True
     enable_stuck_recovery_override: bool = False
 
     @classmethod

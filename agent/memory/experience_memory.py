@@ -62,7 +62,7 @@ class ExperienceMemory:
             if score > 0:
                 scored.append((score, item))
         scored.sort(key=lambda pair: pair[0], reverse=True)
-        return [item.to_dict() for _, item in scored[:top_k]]
+        return [self._to_prompt_lesson(item) for _, item in scored[:top_k]]
 
     def prune_memory(self, max_items: Optional[int] = None) -> None:
         max_items = max_items or self.max_items
@@ -92,6 +92,82 @@ class ExperienceMemory:
         with open(self.memory_path, "w", encoding="utf-8") as f:
             for item in self.items:
                 f.write(json.dumps(item.to_dict(), sort_keys=True) + "\n")
+
+    @staticmethod
+    def _to_prompt_lesson(item: ExperienceMemoryItem) -> Dict[str, Any]:
+        """Return the part of memory that is useful for test-time decisions.
+
+        Online GT reflection uses GT only as a teacher signal while writing the
+        memory. The VLM should retrieve the resulting visual/state rule, not old
+        GT coordinates or deviation distances.
+        """
+        state = dict(item.state_condition or {})
+        state.pop("teacher_signal_debug", None)
+        compact_state = {
+            key: state.get(key)
+            for key in (
+                "student_selected_skill",
+                "selected_skill_sequence",
+                "learning_trigger",
+                "decision_error",
+                "test_time_condition",
+                "skill_preference_rule",
+                "avoid_rule",
+                "visual_evidence_used",
+                "visual_evidence",
+                "visual_evidence_reliability",
+                "visual_target_relation",
+                "visual_room_cues",
+                "visual_generic_landmarks",
+                "target_candidate_evidence",
+            )
+            if state.get(key) is not None
+        }
+        return {
+            "memory_id": item.memory_id,
+            "created_at": item.created_at,
+            "split": item.split,
+            "target_category": item.target_category,
+            "scene_context": item.scene_context,
+            "success": item.success,
+            "failure_type": item.failure_type,
+            "failure_class": item.failure_class,
+            "state_condition": compact_state,
+            "bad_decision": item.bad_decision,
+            "better_decision": item.better_decision,
+            "lesson": ExperienceMemory._prompt_safe_lesson(item),
+            "confidence": item.confidence,
+            "usage_count": item.usage_count,
+        }
+
+    @staticmethod
+    def _prompt_safe_lesson(item: ExperienceMemoryItem) -> str:
+        lesson = item.lesson or ""
+        lowered = lesson.lower()
+        forbidden = (
+            "gt", "ground truth", "teacher", "oracle", "shortest path",
+            "deviation", "distance-to-gt", "distance to gt", "coordinate",
+        )
+        if lesson and not any(term in lowered for term in forbidden):
+            return lesson
+        state = item.state_condition or {}
+        previous_skill = (
+            state.get("student_selected_skill")
+            or (state.get("selected_skill_sequence") or [None])[-1]
+            or "the previous skill"
+        )
+        better = item.better_decision or "a validator-safe alternative skill"
+        target = item.target_category or "the target"
+        visual = (
+            state.get("visual_evidence_used")
+            or state.get("visual_evidence_reliability")
+            or "the current visual/frontier evidence"
+        )
+        return (
+            f"For target={target}, in a similar visual/navigation state ({visual}), "
+            f"avoid repeating {previous_skill} when it is not improving target evidence; "
+            f"prefer {better} when validator preconditions are satisfied."
+        )
 
     def _can_write(self, split: str) -> bool:
         if self.write_mode == "disabled":

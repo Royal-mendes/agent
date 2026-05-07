@@ -27,8 +27,9 @@ Reflective agent additions:
 Current default HM3Dv2 setting in `config/habitat_eval_hm3dv2.yaml`:
 
 - `reflective_agent.enable_reflective_agent: true`
-- `reflective_agent.vlm_provider: local`
-- `reflective_agent.vlm_model: qwen2.5-vl-7b-instruct`
+- `reflective_agent.vlm_provider: openai`
+- `reflective_agent.vlm_model: null`, resolved from `OPENAI_MODEL`
+- `reflective_agent.vlm_base_url: ""`, resolved from `OPENAI_BASE_URL`
 - `reflective_agent.enable_rgb_observation: true`
 - `reflective_agent.enable_semantic_map_observation: false`
 - GT teacher learning switches are enabled for validation-time self-evolution experiments.
@@ -331,9 +332,9 @@ The VLM/agent can only select high-level skills, never low-level actions:
 
 - `SEMANTIC_EXPLORE`
 - `GEOMETRIC_EXPLORE`
-- `VERIFY_TARGET`
 - `NAVIGATE_TO_CONFIRMED_TARGET`
 - `RECOVER_FROM_STUCK`
+- `RETURN_TO_BEST_KNOWN_POINT`
 - `FOLLOW_APEXNAV_PROPOSAL`
 - `FALLBACK_APEXNAV`
 
@@ -342,6 +343,7 @@ Important runtime behavior:
 - ApexNav mapping, frontier extraction, semantic scoring, target detection/fusion, and low-level navigation remain ApexNav-owned.
 - VLM calls occur at high-level commitment refresh points, not every environment step.
 - Current visual input to VLM is RGB only; semantic map image input is disabled.
+- `VERIFY_TARGET` is disabled in the current snapshot; uncertain targets fall back to exploration / ApexNav proposal instead of a separate active verification loop.
 - Stop is gated by StopValidator. VLM target stop must use a valid target candidate id with sufficient confidence and multiview confirmation.
 - GT trajectory learning writes structured feedback/memory when enabled.
 

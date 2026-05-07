@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import os
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from agent.memory.experience_memory import ExperienceMemory
@@ -15,6 +18,13 @@ from agent.schemas import (
 )
 
 
+EPISODE_REFLECTION_SYSTEM_PROMPT = """You are a high-level reflection agent for object-goal navigation.
+You analyze completed episodes to improve future high-level skill selection.
+Use only the structured episode trace, validator outcomes, target/frontier evidence, failure signals, and optional GT feedback.
+Do not output hidden chain-of-thought. Return concise public explanations and reusable navigation lessons.
+Return only valid JSON."""
+
+
 class ReflectionEngine:
     """Rule-based trajectory-to-memory feedback for navigation episodes."""
 
@@ -23,6 +33,7 @@ class ReflectionEngine:
         cfg: Optional[AgentConfig] = None,
         experience_memory: Optional[ExperienceMemory] = None,
         policy_patch_table: Optional[PolicyPatchTable] = None,
+        vlm_provider: Optional[Any] = None,
     ) -> None:
         self.cfg = cfg or AgentConfig()
         self.experience_memory = experience_memory or ExperienceMemory(
@@ -32,8 +43,17 @@ class ReflectionEngine:
             write_mode=self.cfg.memory_write_mode,
         )
         self.policy_patch_table = policy_patch_table or PolicyPatchTable(self.cfg.policy_patch_path, self.cfg)
+        self.vlm_provider = vlm_provider
+        if self.vlm_provider is None and self.cfg.enable_vlm_episode_reflection and (self.cfg.vlm_provider or "mock") != "mock":
+            try:
+                from agent.vlm_provider import build_vlm_provider
+
+                self.vlm_provider = build_vlm_provider(self.cfg)
+            except Exception:
+                self.vlm_provider = None
 
     def reflect_episode(self, episode: Dict[str, Any]) -> Dict[str, Any]:
+        episode = self._with_logged_decisions(episode)
         split = episode.get("split") or "unknown"
         success = bool(episode.get("success", False))
         skill_sequence = self._skill_sequence(episode)
@@ -48,6 +68,34 @@ class ReflectionEngine:
         )
         state_condition = self._state_condition(episode, skill_sequence)
         proposal = self._policy_patch_for_episode(episode, failure_type, confidence)
+        reflection_source = "rule_based"
+        vlm_reflection = self._vlm_reflect_episode(
+            episode=episode,
+            success=success,
+            failure_type=failure_type,
+            failure_class=failure_class,
+            skill_sequence=skill_sequence,
+            state_condition=state_condition,
+            rule_lesson=lesson,
+            rule_bad_decision=bad_decision,
+            rule_better_decision=better_decision,
+        )
+        if vlm_reflection.get("source") == "vlm":
+            reflection_source = "vlm_episode_reflection"
+            failure_type = vlm_reflection.get("failure_type") or failure_type
+            failure_class = vlm_reflection.get("failure_class") or failure_class
+            lesson = vlm_reflection.get("lesson") or lesson
+            bad_decision = vlm_reflection.get("bad_decision") or bad_decision
+            better_decision = (
+                vlm_reflection.get("better_decision")
+                or vlm_reflection.get("better_skill")
+                or better_decision
+            )
+            confidence = self._bounded_confidence(vlm_reflection.get("confidence"), confidence)
+            state_condition.update(vlm_reflection.get("state_condition_updates") or {})
+            proposal = self._vlm_policy_patch_for_episode(
+                episode, vlm_reflection, fallback=proposal, confidence=confidence
+            )
 
         memory_item = ExperienceMemoryItem(
             split=split,
@@ -82,6 +130,8 @@ class ReflectionEngine:
             "episode_reflection": reflection.to_dict(),
             "experience_memory_item": memory_item.to_dict(),
             "policy_patch_proposals": [proposal.to_dict()] if proposal else [],
+            "reflection_source": reflection_source,
+            "vlm_episode_reflection": vlm_reflection,
         }
 
     def finalize_episode(self, episode: Dict[str, Any]) -> Dict[str, Any]:
@@ -171,6 +221,199 @@ class ReflectionEngine:
             "The selected skill did not satisfy its postcondition.",
             f"Switch between {SkillName.SEMANTIC_EXPLORE.value} and {SkillName.GEOMETRIC_EXPLORE.value} based on evidence.",
             0.6,
+        )
+
+    def _vlm_reflect_episode(
+        self,
+        episode: Dict[str, Any],
+        success: bool,
+        failure_type: Optional[str],
+        failure_class: Optional[str],
+        skill_sequence: List[str],
+        state_condition: Dict[str, Any],
+        rule_lesson: str,
+        rule_bad_decision: Optional[str],
+        rule_better_decision: Optional[str],
+    ) -> Dict[str, Any]:
+        if not self.cfg.enable_vlm_episode_reflection or self.vlm_provider is None:
+            return {}
+        payload = {
+            "task": "Reflect on the completed ObjectNav episode and produce reusable skill-selection memory.",
+            "required_json_format": {
+                "failure_analysis": "short public explanation of why the episode succeeded or failed",
+                "bad_decision": "which high-level skill choice or stop/retry choice was harmful, or null",
+                "better_decision": "what the agent should do differently next time",
+                "better_skill": "one allowed skill name if a different skill is recommended, or null",
+                "lesson": "one concise reusable lesson for future episodes",
+                "failure_type": failure_type or "null",
+                "failure_class": failure_class or "null",
+                "state_condition_updates": {
+                    "key": "small structured conditions that make the lesson applicable"
+                },
+                "suggested_policy_patch": {
+                    "trigger_condition": "structured condition for applying this lesson",
+                    "recommended_action": "skill name",
+                    "rationale": "short public rationale",
+                    "confidence": 0.0
+                },
+                "confidence": 0.0,
+            },
+            "episode": self._compact_episode(episode, success, failure_type, failure_class, skill_sequence),
+            "rule_based_reflection": {
+                "lesson": rule_lesson,
+                "bad_decision": rule_bad_decision,
+                "better_decision": rule_better_decision,
+                "state_condition": state_condition,
+            },
+            "allowed_skills": [item.value for item in SkillName],
+            "reflection_instructions": [
+                "Prefer lessons that change future skill arbitration, verification, recovery, or stop decisions.",
+                "If GT feedback is present, explain why the GT path or progress signal implies a better skill.",
+                "Do not recommend low-level continuous actions.",
+                "Do not invent unavailable skills.",
+            ],
+        }
+        try:
+            raw = self.vlm_provider.generate(
+                EPISODE_REFLECTION_SYSTEM_PROMPT,
+                json.dumps(payload, indent=2, sort_keys=True, default=str),
+            )
+            parsed = self._parse_json(raw)
+        except Exception as exc:
+            return {"source": "vlm_error", "error": f"{type(exc).__name__}: {exc}"}
+        if not parsed:
+            return {}
+        parsed["source"] = "vlm"
+        parsed["raw_response"] = raw
+        if parsed.get("better_skill") and parsed.get("better_skill") not in {item.value for item in SkillName}:
+            parsed["better_skill"] = None
+        if parsed.get("suggested_policy_patch") and not isinstance(parsed["suggested_policy_patch"], dict):
+            parsed["suggested_policy_patch"] = None
+        return parsed
+
+    def _compact_episode(
+        self,
+        episode: Dict[str, Any],
+        success: bool,
+        failure_type: Optional[str],
+        failure_class: Optional[str],
+        skill_sequence: List[str],
+    ) -> Dict[str, Any]:
+        decisions = episode.get("decisions") or episode.get("decision_trace") or []
+        compact_decisions = []
+        max_items = max(1, int(self.cfg.vlm_episode_reflection_max_decisions))
+        if decisions:
+            selected = decisions[-max_items:]
+            for item in selected:
+                state = item.get("state_summary") or {}
+                compact_decisions.append(
+                    {
+                        "timestep": item.get("timestep"),
+                        "selected_skill": (item.get("agent_decision") or {}).get("selected_skill")
+                        or item.get("selected_skill")
+                        or item.get("executed_skill"),
+                        "executed_skill": item.get("executed_skill"),
+                        "skill_args": (item.get("agent_decision") or {}).get("skill_args")
+                        or (item.get("validator_result") or {}).get("final_arguments")
+                        or {},
+                        "validator_result": item.get("validator_result"),
+                        "retrieved_lessons": item.get("retrieved_lessons") or [],
+                        "semantic_score_stats": state.get("semantic_score_stats"),
+                        "target_candidates": state.get("target_candidates"),
+                        "frontier_count": len(state.get("frontiers") or []),
+                        "navigation_history": state.get("navigation_history"),
+                        "gt_feedback": state.get("gt_feedback"),
+                    }
+                )
+        return {
+            "episode_id": episode.get("episode_id"),
+            "scene_id": episode.get("scene_id"),
+            "split": episode.get("split") or "unknown",
+            "target_category": episode.get("target_category"),
+            "success": success,
+            "failure_type": failure_type,
+            "failure_class": failure_class,
+            "stop_reason": episode.get("stop_reason"),
+            "steps": episode.get("steps"),
+            "spl": episode.get("spl"),
+            "softspl": episode.get("softspl"),
+            "final_distance_to_goal": episode.get("final_distance_to_goal"),
+            "skill_sequence": skill_sequence,
+            "failure_signals": episode.get("failure_signals") or [],
+            "validator_rejections": episode.get("validator_rejections") or [],
+            "target_detection_trace": episode.get("target_detection_trace") or [],
+            "target_candidate_trace": episode.get("target_candidate_trace") or [],
+            "selected_frontier_trace": episode.get("selected_frontier_trace") or [],
+            "agent_diagnostics": episode.get("agent_diagnostics") or {},
+            "recent_decisions": compact_decisions,
+        }
+
+    def _with_logged_decisions(self, episode: Dict[str, Any]) -> Dict[str, Any]:
+        if episode.get("decisions") or not self.cfg.enable_episode_logger:
+            return episode
+        path = self._episode_log_path(episode.get("episode_id"))
+        if not path or not os.path.exists(path):
+            return episode
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            return episode
+        decisions = data.get("decisions") or []
+        if not decisions:
+            return episode
+        enriched = dict(episode)
+        enriched["decisions"] = decisions
+        enriched.setdefault("episode_log_path", path)
+        return enriched
+
+    def _episode_log_path(self, episode_id: Any) -> Optional[str]:
+        root = self.cfg.episode_log_root
+        if not root:
+            return None
+        run_id = self.cfg.run_id or "default"
+        episodes_dir = os.path.join(root, run_id, "episodes")
+        candidates = []
+        if episode_id:
+            candidates.append(os.path.join(episodes_dir, f"{self._safe_name(episode_id)}.json"))
+        candidates.append(os.path.join(episodes_dir, "unknown_episode.json"))
+        for path in candidates:
+            if os.path.exists(path):
+                return path
+        return None
+
+    @staticmethod
+    def _safe_name(value: Any) -> str:
+        return re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value))[:160]
+
+    def _vlm_policy_patch_for_episode(
+        self,
+        episode: Dict[str, Any],
+        vlm_reflection: Dict[str, Any],
+        fallback: Optional[PolicyPatchProposal],
+        confidence: float,
+    ) -> Optional[PolicyPatchProposal]:
+        patch = vlm_reflection.get("suggested_policy_patch")
+        if not isinstance(patch, dict):
+            return fallback
+        recommended = patch.get("recommended_action") or vlm_reflection.get("better_skill")
+        if recommended not in {item.value for item in SkillName}:
+            return fallback
+        trigger = patch.get("trigger_condition") or {}
+        if not isinstance(trigger, dict):
+            trigger = {"failure_type": vlm_reflection.get("failure_type") or episode.get("failure_type")}
+        return PolicyPatchProposal(
+            target_scope=patch.get("target_scope") or episode.get("target_category"),
+            trigger_condition=trigger,
+            recommended_action=recommended,
+            rationale=patch.get("rationale")
+            or vlm_reflection.get("failure_analysis")
+            or vlm_reflection.get("lesson")
+            or "",
+            confidence=self._bounded_confidence(patch.get("confidence"), confidence),
+            support_count=int(patch.get("support_count") or 1),
+            source_episode_id=patch.get("source_episode_id") or episode.get("episode_id"),
+            active=bool(patch.get("active", False)),
         )
 
     def _policy_patch_for_episode(
@@ -313,6 +556,31 @@ class ReflectionEngine:
             "memory_write_count",
         ]
         return {key: episode.get(key) for key in keys if key in episode}
+
+    @staticmethod
+    def _parse_json(raw: str) -> Dict[str, Any]:
+        if not raw:
+            return {}
+        raw = raw.strip()
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            start = raw.find("{")
+            end = raw.rfind("}")
+            if start >= 0 and end > start:
+                try:
+                    return json.loads(raw[start : end + 1])
+                except json.JSONDecodeError:
+                    return {}
+        return {}
+
+    @staticmethod
+    def _bounded_confidence(value: Any, default: float) -> float:
+        try:
+            confidence = float(value)
+        except (TypeError, ValueError):
+            confidence = float(default)
+        return max(0.0, min(1.0, confidence))
 
     @staticmethod
     def _summary(success: bool, failure_type: Optional[str], lesson: str) -> str:

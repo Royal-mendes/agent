@@ -51,6 +51,8 @@
 
 **[RA-L'25]** This repository maintains the implementation of "ApexNav: An Adaptive Exploration Strategy for Zero-Shot Object Navigation with Target-centric Semantic Fusion".
 
+This fork additionally contains a reflective/self-evolving navigation agent layer. For reproducing the current reflective-agent code on a new machine, start from [README_REPRODUCE.md](README_REPRODUCE.md) and [README_RUNTIME_CHECKLIST.md](README_RUNTIME_CHECKLIST.md).
+
 The pipeline of ApexNav is detailed in the overview below.
 
 <p align="center" style="font-size: 1.0em;">

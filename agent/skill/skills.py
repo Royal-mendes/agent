@@ -56,6 +56,19 @@ class ApexNavToolAdapter:
             return self._call("recover_from_stuck", skill_args, SkillName.RECOVER_FROM_STUCK.value)
         return self._call("call_original_apexnav_policy", skill_args, SkillName.RECOVER_FROM_STUCK.value)
 
+    def return_to_best_known_point(self, skill_args: Dict[str, Any]) -> SkillExecutionResult:
+        if hasattr(self.context, "return_to_best_known_point"):
+            return self._call(
+                "return_to_best_known_point",
+                skill_args,
+                SkillName.RETURN_TO_BEST_KNOWN_POINT.value,
+            )
+        return self._call(
+            "call_original_apexnav_policy",
+            skill_args,
+            SkillName.RETURN_TO_BEST_KNOWN_POINT.value,
+        )
+
     def _call(
         self,
         method_name: str,
@@ -180,7 +193,7 @@ def build_default_skill_registry() -> SkillRegistry:
                 "target_unreachable",
                 "stuck",
             ],
-            recovery_action=SkillName.VERIFY_TARGET.value,
+            recovery_action=SkillName.FOLLOW_APEXNAV_PROPOSAL.value,
             memory_update_on_failure=["premature_stop", "false_positive_stop"],
             validator_constraints=[
                 "confidence_above_stop_threshold",
@@ -203,6 +216,33 @@ def build_default_skill_registry() -> SkillRegistry:
             memory_update_on_failure=["planner_stuck"],
         ),
         _recover_handler,
+    )
+    registry.register(
+        SkillSpec(
+            name=SkillName.RETURN_TO_BEST_KNOWN_POINT.value,
+            purpose="Return to the best historical navigation point from the current episode.",
+            inputs=["navigation_history.best_known_point", "frontiers", "target_candidates", "semantic_score_stats"],
+            preconditions=["best_known_point_available"],
+            forward_action="call ApexNav path search back to the recorded best known point",
+            expected_postconditions=[
+                "robot reaches the best known point",
+                "distance to best known point decreases",
+                "new valid waypoint selected toward the best known point",
+            ],
+            failure_signals=[
+                "best_known_point_unavailable",
+                "best_known_point_unreachable",
+                "planner_stuck",
+                "timeout",
+            ],
+            recovery_action=SkillName.RECOVER_FROM_STUCK.value,
+            memory_update_on_failure=["return_to_best_point_failed"],
+            validator_constraints=[
+                "must_have_best_known_point",
+                "does_not_bypass_target_preemption_or_stop_gate",
+            ],
+        ),
+        _return_to_best_known_point_handler,
     )
     registry.register(
         SkillSpec(
@@ -256,6 +296,10 @@ def _navigate_target_handler(skill_args: Dict[str, Any], context: Any) -> SkillE
 
 def _recover_handler(skill_args: Dict[str, Any], context: Any) -> SkillExecutionResult:
     return _adapter(context).recover_from_stuck(skill_args)
+
+
+def _return_to_best_known_point_handler(skill_args: Dict[str, Any], context: Any) -> SkillExecutionResult:
+    return _adapter(context).return_to_best_known_point(skill_args)
 
 
 def _follow_apexnav_handler(skill_args: Dict[str, Any], context: Any) -> SkillExecutionResult:

@@ -222,6 +222,41 @@ int ExplorationManager::planNextBestPointWithSkill(
     return planNextBestPoint(pos, yaw);
   }
 
+  if (selected_skill == "RETURN_TO_BEST_KNOWN_POINT") {
+    bool best_valid = false;
+    double best_x = 0.0;
+    double best_y = 0.0;
+    double best_score = 0.0;
+    int best_timestep = -1;
+    ros::param::get("/reflective_agent/best_known_point_valid", best_valid);
+    ros::param::get("/reflective_agent/best_known_point_x", best_x);
+    ros::param::get("/reflective_agent/best_known_point_y", best_y);
+    ros::param::get("/reflective_agent/best_known_point_score", best_score);
+    ros::param::get("/reflective_agent/best_known_point_timestep", best_timestep);
+    if (best_valid) {
+      Eigen::Vector2d best_pos(best_x, best_y);
+      Eigen::Vector2d next_best_pos;
+      std::vector<Eigen::Vector2d> next_best_path;
+      if ((best_pos - pos2d).norm() < 0.25) {
+        ROS_WARN("[Reflective Skill] Already near best known point, fallback to ApexNav");
+        return planNextBestPoint(pos, yaw);
+      }
+      if (searchFrontierPath(pos2d, best_pos, next_best_pos, next_best_path) &&
+          !next_best_path.empty()) {
+        ROS_WARN("[Reflective Skill] RETURN_TO_BEST_KNOWN_POINT to (%.2f, %.2f), score=%.3f step=%d",
+            best_pos(0), best_pos(1), best_score, best_timestep);
+        ed_->next_pos_ = next_best_pos;
+        ed_->next_best_path_ = next_best_path;
+        return EXPLORATION;
+      }
+      ROS_WARN("[Reflective Skill] Best known point unreachable, fallback to ApexNav");
+    }
+    else {
+      ROS_WARN("[Reflective Skill] Best known point unavailable, fallback to ApexNav");
+    }
+    return planNextBestPoint(pos, yaw);
+  }
+
   Eigen::Vector2d next_best_pos;
   std::vector<Eigen::Vector2d> next_best_path;
   if (selected_skill == "GEOMETRIC_EXPLORE") {

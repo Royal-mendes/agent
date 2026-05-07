@@ -141,7 +141,7 @@ class GTTrajectoryTeacher:
                 "landmark": "observable YOLO landmark or map/frontier cue that should anchor the decision",
                 "direction": "short navigation direction relative to that landmark or map cue",
                 "gt_rationale": "why the GT trajectory direction was preferable",
-                "better_skill": "one of SEMANTIC_EXPLORE, GEOMETRIC_EXPLORE, VERIFY_TARGET, NAVIGATE_TO_CONFIRMED_TARGET, RECOVER_FROM_STUCK, FOLLOW_APEXNAV_PROPOSAL, FALLBACK_APEXNAV",
+                "better_skill": "one of SEMANTIC_EXPLORE, GEOMETRIC_EXPLORE, NAVIGATE_TO_CONFIRMED_TARGET, RECOVER_FROM_STUCK, FOLLOW_APEXNAV_PROPOSAL, FALLBACK_APEXNAV",
                 "lesson": "short reusable lesson for future VLM skill selection",
                 "confidence": 0.0,
             },
@@ -177,7 +177,10 @@ class GTTrajectoryTeacher:
             if parsed:
                 parsed["source"] = "vlm"
                 parsed["raw_response"] = raw
-                if parsed.get("better_skill") not in {item.value for item in SkillName}:
+                allowed = {item.value for item in SkillName}
+                if self.cfg.disable_verify_target:
+                    allowed.discard(SkillName.VERIFY_TARGET.value)
+                if parsed.get("better_skill") not in allowed:
                     parsed["better_skill"] = self._heuristic_better_skill(step)
                 return parsed
         except Exception as exc:
@@ -190,6 +193,12 @@ class GTTrajectoryTeacher:
         if candidate:
             if self._candidate_stop_ready(candidate):
                 return SkillName.NAVIGATE_TO_CONFIRMED_TARGET.value
+            if self.cfg.disable_verify_target:
+                if (state.get("semantic_score_stats") or {}).get("has_clear_peak"):
+                    return SkillName.SEMANTIC_EXPLORE.value
+                if state.get("frontiers"):
+                    return SkillName.GEOMETRIC_EXPLORE.value
+                return SkillName.FOLLOW_APEXNAV_PROPOSAL.value
             return SkillName.VERIFY_TARGET.value
         recent_failures = set((state.get("navigation_history") or {}).get("recent_failures") or [])
         if recent_failures & {"planner_stuck", "repeated_collision", "frontier_failure", "no_frontier_deadend"}:
@@ -227,7 +236,7 @@ class GTTrajectoryTeacher:
 
     def _heuristic_args_for_skill(self, step: TrajectoryStep, skill: str) -> Dict[str, Any]:
         state = step.state_summary or {}
-        if skill in {SkillName.VERIFY_TARGET.value, SkillName.NAVIGATE_TO_CONFIRMED_TARGET.value}:
+        if skill == SkillName.NAVIGATE_TO_CONFIRMED_TARGET.value:
             candidate = self._best_target_candidate(state)
             return {"target_candidate_id": None if candidate is None else candidate.get("id")}
         if skill == SkillName.SEMANTIC_EXPLORE.value:

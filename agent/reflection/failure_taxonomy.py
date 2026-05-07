@@ -13,6 +13,7 @@ NON_DEGRADING_FAILURES = {
     "geometric_explore_no_progress",
     "inefficient_exploration",
     "missing_target",
+    "return_to_best_point_failed",
 }
 
 DEGRADING_FAILURES = {
@@ -60,7 +61,14 @@ def is_degrading_failure(failure_type: Optional[str], consecutive_count: int = 1
 
 
 def suggest_recovery_skill(failure_type: Optional[str], disable_recover_from_stuck: bool = False) -> str:
-    if failure_type in {"planner_stuck", "repeated_collision", "timeout", "timeout_near_goal", "repeated_bad_frontier"}:
+    if failure_type in {
+        "planner_stuck",
+        "repeated_collision",
+        "timeout",
+        "timeout_near_goal",
+        "repeated_bad_frontier",
+        "return_to_best_point_failed",
+    }:
         return SkillName.FALLBACK_APEXNAV.value if disable_recover_from_stuck else SkillName.RECOVER_FROM_STUCK.value
     if failure_type in {"false_positive_candidate", "false_positive_stop", "premature_stop", "target_candidate_pollution"}:
         return SkillName.VERIFY_TARGET.value

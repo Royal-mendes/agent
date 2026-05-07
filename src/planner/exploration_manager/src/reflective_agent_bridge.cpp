@@ -3,6 +3,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
@@ -28,21 +29,28 @@ void ReflectiveAgentBridge::init(ros::NodeHandle& nh)
   vlm_provider_ = getStringParam(nh, "vlm_provider", "mock");
   vlm_model_ = getStringParam(nh, "vlm_model", "gpt-5.5");
   vlm_api_key_ = getStringParam(nh, "vlm_api_key", "");
-  vlm_base_url_ = getStringParam(nh, "vlm_base_url", "https://ai.happyclaw.pro/v1");
+  vlm_base_url_ = getStringParam(nh, "vlm_base_url", "");
   memory_path_ = getStringParam(nh, "memory_path", "data/reflection_memory.jsonl");
   memory_read_mode_ = getStringParam(nh, "memory_read_mode", "enabled");
   memory_write_mode_ = getStringParam(nh, "memory_write_mode", "all");
   episode_log_root_ = getStringParam(nh, "episode_log_root", "logs/reflective_agent");
   run_id_ = getStringParam(nh, "run_id", "");
-  python_executable_ =
-      getStringParam(nh, "python_executable", "/root/miniconda3/envs/apexnav/bin/python");
+  const char* env_python = std::getenv("APEXNAV_PYTHON");
+  python_executable_ = getStringParam(
+      nh, "python_executable", env_python && env_python[0] ? env_python : "python");
   project_root_ = getStringParam(nh, "project_root", "");
   if (project_root_.empty()) {
-    char cwd[4096];
-    if (getcwd(cwd, sizeof(cwd)) != nullptr)
-      project_root_ = cwd;
-    else
-      project_root_ = ".";
+    const char* env_project_root = std::getenv("APEXNAV_PROJECT_ROOT");
+    if (env_project_root && env_project_root[0]) {
+      project_root_ = env_project_root;
+    }
+    else {
+      char cwd[4096];
+      if (getcwd(cwd, sizeof(cwd)) != nullptr)
+        project_root_ = cwd;
+      else
+        project_root_ = ".";
+    }
   }
 
   max_retrieved_lessons_ = getIntParam(nh, "max_retrieved_lessons", 5);
@@ -209,18 +217,18 @@ std::string ReflectiveAgentBridge::buildConfigJson() const
   ss << ",\"max_commitment_steps_fallback\":" << max_commitment_steps_fallback_;
   ss << ",\"max_commitment_steps_recovery\":" << max_commitment_steps_recovery_;
   ss << ",\"structural_frontier_count_change_ratio\":"
-     << structural_frontier_count_change_ratio_;
+     << jsonNumber(structural_frontier_count_change_ratio_);
   ss << ",\"structural_frontier_stable_k\":" << structural_frontier_stable_k_;
   ss << ",\"stable_target_event_k\":" << stable_target_event_k_;
   ss << ",\"stuck_threshold\":" << stuck_threshold_;
   ss << ",\"same_frontier_failure_threshold\":" << same_frontier_failure_threshold_;
-  ss << ",\"target_verify_threshold\":" << target_verify_threshold_;
-  ss << ",\"target_stop_threshold\":" << target_stop_threshold_;
-  ss << ",\"semantic_peak_ratio_threshold\":" << semantic_peak_ratio_threshold_;
-  ss << ",\"semantic_peak_std_threshold\":" << semantic_peak_std_threshold_;
-  ss << ",\"low_information_gain_threshold\":" << low_information_gain_threshold_;
-  ss << ",\"vlm_timeout_seconds\":" << vlm_timeout_seconds_;
-  ss << ",\"vlm_temperature\":" << vlm_temperature_;
+  ss << ",\"target_verify_threshold\":" << jsonNumber(target_verify_threshold_);
+  ss << ",\"target_stop_threshold\":" << jsonNumber(target_stop_threshold_);
+  ss << ",\"semantic_peak_ratio_threshold\":" << jsonNumber(semantic_peak_ratio_threshold_);
+  ss << ",\"semantic_peak_std_threshold\":" << jsonNumber(semantic_peak_std_threshold_);
+  ss << ",\"low_information_gain_threshold\":" << jsonNumber(low_information_gain_threshold_);
+  ss << ",\"vlm_timeout_seconds\":" << jsonNumber(vlm_timeout_seconds_);
+  ss << ",\"vlm_temperature\":" << jsonNumber(vlm_temperature_);
   ss << "}";
   return ss.str();
 }
@@ -267,14 +275,15 @@ std::string ReflectiveAgentBridge::buildStateJson(const ReflectiveAgentState& st
     const auto& f = state.frontiers[i];
     if (i != 0)
       ss << ",";
-    ss << "{\"id\":" << f.id << ",\"semantic_score\":" << f.semantic_score
-       << ",\"distance\":" << f.distance << ",\"reachable\":" << (f.reachable ? "true" : "false")
+    ss << "{\"id\":" << f.id << ",\"semantic_score\":" << jsonNumber(f.semantic_score)
+       << ",\"distance\":" << jsonNumber(f.distance)
+       << ",\"reachable\":" << (f.reachable ? "true" : "false")
        << ",\"visited\":" << (f.visited ? "true" : "false")
        << ",\"blocked\":" << (f.blocked ? "true" : "false")
        << ",\"low_value\":" << (f.low_value ? "true" : "false")
        << ",\"last_selected\":" << (f.last_selected ? "true" : "false")
        << ",\"failure_count\":" << f.failure_count << ",\"waypoint\":["
-       << f.waypoint(0) << "," << f.waypoint(1) << "]}";
+       << jsonNumber(f.waypoint(0)) << "," << jsonNumber(f.waypoint(1)) << "]}";
   }
   ss << "]";
   ss << ",\"target_candidates\":[";
@@ -286,14 +295,15 @@ std::string ReflectiveAgentBridge::buildStateJson(const ReflectiveAgentState& st
                                  ? state.target_category
                                  : ("label_" + std::to_string(c.label));
     ss << "{\"id\":" << c.id << ",\"label\":\"" << jsonEscape(label_text) << "\""
-       << ",\"label_id\":" << c.label << ",\"confidence\":" << c.confidence
-       << ",\"distance\":" << c.distance
+       << ",\"label_id\":" << c.label << ",\"confidence\":" << jsonNumber(c.confidence)
+       << ",\"distance\":" << jsonNumber(c.distance)
        << ",\"reachable\":" << (c.reachable ? "true" : "false")
        << ",\"multi_view_confirmed\":" << (c.multi_view_confirmed ? "true" : "false")
        << ",\"num_views\":" << c.num_views
        << ",\"rejected_false_positive\":"
        << (c.rejected_false_positive ? "true" : "false")
-       << ",\"waypoint\":[" << c.waypoint(0) << "," << c.waypoint(1) << "]}";
+       << ",\"waypoint\":[" << jsonNumber(c.waypoint(0)) << ","
+       << jsonNumber(c.waypoint(1)) << "]}";
   }
   ss << "]";
   ss << ",\"rgb_observation\":";
@@ -329,11 +339,34 @@ std::string ReflectiveAgentBridge::buildStateJson(const ReflectiveAgentState& st
   ss << "],\"recent_selected_skills\":[";
   for (size_t i = 0; i < state.recent_selected_skills.size(); ++i) {
     if (i != 0)
-      ss << ",";
+    ss << ",";
     ss << "\"" << jsonEscape(state.recent_selected_skills[i]) << "\"";
   }
-  ss << "]}";
+  ss << "],\"best_known_point\":{";
+  ss << "\"available\":" << (state.best_known_point_valid ? "true" : "false");
+  ss << ",\"waypoint\":[" << jsonNumber(state.best_known_point(0)) << ","
+     << jsonNumber(state.best_known_point(1)) << "]";
+  ss << ",\"score\":" << jsonNumber(state.best_known_score);
+  ss << ",\"evidence_score\":" << jsonNumber(state.best_known_evidence_score);
+  ss << ",\"distance_to_current\":" << jsonNumber(state.best_known_distance_to_current);
+  ss << ",\"target_confidence\":" << jsonNumber(state.best_known_target_confidence);
+  ss << ",\"target_views\":" << state.best_known_target_views;
+  ss << ",\"semantic_score\":" << jsonNumber(state.best_known_semantic_score);
+  ss << ",\"frontier_score\":" << jsonNumber(state.best_known_frontier_score);
+  ss << ",\"frontier_count\":" << state.best_known_frontier_count;
+  ss << ",\"selection_signal\":\"" << jsonEscape(state.best_known_reason) << "\"";
+  ss << ",\"timestep\":" << state.best_known_timestep;
+  ss << "}}";
   ss << "}";
+  return ss.str();
+}
+
+std::string ReflectiveAgentBridge::jsonNumber(double value)
+{
+  if (!std::isfinite(value))
+    return "null";
+  std::ostringstream ss;
+  ss << value;
   return ss.str();
 }
 

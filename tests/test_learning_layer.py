@@ -13,7 +13,9 @@ from agent.learning.tool_call_dataset import ToolCallDataset
 from agent.learning.trace_learning_manager import TraceLearningManager
 from agent.learning.trajectory_ingestor import TrajectoryIngestor
 from agent.learning.trajectory_schema import TrajectoryEpisode, TrajectoryStep
+from agent.bridge_cli import decide as bridge_decide
 from agent.memory.experience_memory import ExperienceMemory
+from agent.reflection.online_gt_deviation_reflector import OnlineGTDeviationReflector
 from agent.schemas import AgentConfig, SkillName
 
 
@@ -550,6 +552,243 @@ class LearningLayerTests(unittest.TestCase):
             self.assertEqual(sample.source, "gt_progress")
             self.assertEqual(sample.split, "val")
             self.assertTrue(os.path.exists(memory_path))
+
+    def test_online_gt_deviation_reflector_writes_memory_on_threshold_crossing(self):
+        class DummyProvider:
+            def __init__(self):
+                self.calls = 0
+
+            def generate(self, system_prompt, user_prompt, image_data_url=None, image_data_urls=None):
+                self.calls += 1
+                return json.dumps(
+                    {
+                        "failure_analysis": "The chosen frontier pulled away from the GT corridor.",
+                        "gt_difference": "The GT path stayed near the semantic corridor toward the goal.",
+                        "bad_decision": "GEOMETRIC_EXPLORE selected a frontier that increased GT deviation.",
+                        "better_skill": SkillName.SEMANTIC_EXPLORE.value,
+                        "better_decision": "Select the semantic frontier aligned with the GT corridor.",
+                        "lesson": "When geometric exploration increases GT-path deviation, prefer semantic exploration.",
+                        "confidence": 0.83,
+                    }
+                )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = os.path.join(tmpdir, "logs")
+            episodes_dir = os.path.join(root, "run_online", "episodes")
+            os.makedirs(episodes_dir)
+            with open(os.path.join(episodes_dir, "e_online.json"), "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "episode_id": "e_online",
+                        "decisions": [
+                            {
+                                "timestep": 12,
+                                "state_summary": {
+                                    "episode_id": "e_online",
+                                    "scene_id": "scene1",
+                                    "split": "val",
+                                    "target_category": "chair",
+                                    "gt_feedback": {
+                                        "gt_trajectory": {
+                                            "gt_path_available": True,
+                                            "distance_to_gt_path": 0.2,
+                                            "gt_path_progress_ratio": 0.1,
+                                            "gt_next_waypoint": [1.0, 0.0, 1.0],
+                                        }
+                                    },
+                                    "semantic_score_stats": {"has_clear_peak": True},
+                                    "target_candidates": [],
+                                    "frontiers": [{"id": 3, "reachable": True, "semantic_score": 0.9}],
+                                },
+                                "agent_decision": {
+                                    "selected_skill": SkillName.GEOMETRIC_EXPLORE.value,
+                                    "skill_args": {"frontier_id": 5},
+                                },
+                                "validator_result": {
+                                    "accepted": True,
+                                    "final_skill": SkillName.GEOMETRIC_EXPLORE.value,
+                                    "final_arguments": {"frontier_id": 5},
+                                },
+                            }
+                        ],
+                    },
+                    f,
+                )
+            memory_path = os.path.join(tmpdir, "memory.jsonl")
+            cfg = AgentConfig(
+                enable_online_gt_deviation_reflection=True,
+                enable_vlm_gt_trajectory_reflection=True,
+                vlm_provider="local",
+                episode_log_root=root,
+                run_id="run_online",
+                memory_path=memory_path,
+                memory_read_mode="enabled",
+                memory_write_mode="all",
+                gt_path_deviation_threshold=1.5,
+                gt_path_deviation_growth_threshold=0.5,
+            )
+            provider = DummyProvider()
+            reflector = OnlineGTDeviationReflector(
+                cfg,
+                provider,
+                ExperienceMemory(memory_path, read_mode="enabled", write_mode="all"),
+            )
+            result = reflector.maybe_reflect(
+                {
+                    "episode_id": "e_online",
+                    "scene_id": "scene1",
+                    "split": "val",
+                    "target_category": "chair",
+                    "gt_feedback": {
+                        "gt_trajectory": {
+                            "gt_path_available": True,
+                            "distance_to_gt_path": 1.9,
+                            "gt_path_progress_ratio": 0.1,
+                            "gt_next_waypoint": [1.2, 0.0, 1.2],
+                        }
+                    },
+                    "semantic_score_stats": {"has_clear_peak": True},
+                    "target_candidates": [],
+                    "frontiers": [{"id": 3, "reachable": True, "semantic_score": 0.9}],
+                }
+            )
+            self.assertTrue(result["triggered"])
+            self.assertTrue(result["memory_written"])
+            self.assertEqual(result["better_skill"], SkillName.SEMANTIC_EXPLORE.value)
+            self.assertEqual(provider.calls, 1)
+            with open(memory_path, "r", encoding="utf-8") as f:
+                item = json.loads(f.readline())
+            self.assertEqual(item["failure_type"], "gt_trajectory_deviation")
+            self.assertIn("SEMANTIC_EXPLORE", item["lesson"])
+            self.assertEqual(item["state_condition"]["student_selected_skill"], SkillName.GEOMETRIC_EXPLORE.value)
+
+    def test_online_gt_deviation_reflector_skips_when_below_threshold(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = os.path.join(tmpdir, "logs")
+            episodes_dir = os.path.join(root, "run_online", "episodes")
+            os.makedirs(episodes_dir)
+            with open(os.path.join(episodes_dir, "e_online.json"), "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "episode_id": "e_online",
+                        "decisions": [
+                            {
+                                "timestep": 12,
+                                "state_summary": {
+                                    "gt_feedback": {
+                                        "gt_trajectory": {
+                                            "gt_path_available": True,
+                                            "distance_to_gt_path": 0.2,
+                                        }
+                                    }
+                                },
+                                "agent_decision": {"selected_skill": SkillName.GEOMETRIC_EXPLORE.value},
+                            }
+                        ],
+                    },
+                    f,
+                )
+            cfg = AgentConfig(
+                enable_online_gt_deviation_reflection=True,
+                episode_log_root=root,
+                run_id="run_online",
+                memory_path=os.path.join(tmpdir, "memory.jsonl"),
+                memory_write_mode="all",
+                gt_path_deviation_threshold=1.5,
+                gt_path_deviation_growth_threshold=0.5,
+            )
+            result = OnlineGTDeviationReflector(cfg).maybe_reflect(
+                {
+                    "episode_id": "e_online",
+                    "gt_feedback": {
+                        "gt_trajectory": {
+                            "gt_path_available": True,
+                            "distance_to_gt_path": 0.7,
+                        }
+                    },
+                }
+            )
+            self.assertFalse(result["triggered"])
+            self.assertEqual(result["reason"], "below_deviation_trigger")
+
+    def test_bridge_reports_gt_deviation_without_memory_write_when_vlm_unavailable(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = os.path.join(tmpdir, "logs")
+            episodes_dir = os.path.join(root, "run_bridge", "episodes")
+            os.makedirs(episodes_dir)
+            with open(os.path.join(episodes_dir, "e_bridge.json"), "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "episode_id": "e_bridge",
+                        "decisions": [
+                            {
+                                "timestep": 9,
+                                "state_summary": {
+                                    "episode_id": "e_bridge",
+                                    "split": "val",
+                                    "target_category": "chair",
+                                    "gt_feedback": {
+                                        "gt_trajectory": {
+                                            "gt_path_available": True,
+                                            "distance_to_gt_path": 0.1,
+                                        }
+                                    },
+                                    "semantic_score_stats": {"has_clear_peak": True},
+                                    "frontiers": [{"id": 1, "reachable": True, "semantic_score": 0.8}],
+                                    "target_candidates": [],
+                                },
+                                "agent_decision": {
+                                    "selected_skill": SkillName.GEOMETRIC_EXPLORE.value,
+                                    "skill_args": {"frontier_id": 4},
+                                },
+                                "validator_result": {
+                                    "accepted": True,
+                                    "final_skill": SkillName.GEOMETRIC_EXPLORE.value,
+                                },
+                            }
+                        ],
+                    },
+                    f,
+                )
+            result = bridge_decide(
+                {
+                    "config": {
+                        "enable_reflective_agent": True,
+                        "vlm_provider": "mock",
+                        "enable_reflection_memory": True,
+                        "enable_online_gt_deviation_reflection": True,
+                        "episode_log_root": root,
+                        "run_id": "run_bridge",
+                        "memory_path": os.path.join(tmpdir, "memory.jsonl"),
+                        "memory_read_mode": "enabled",
+                        "memory_write_mode": "all",
+                        "gt_path_deviation_threshold": 1.5,
+                        "gt_path_deviation_growth_threshold": 0.5,
+                    },
+                    "state": {
+                        "episode_id": "e_bridge",
+                        "split": "val",
+                        "target_category": "chair",
+                        "gt_feedback": {
+                            "gt_trajectory": {
+                                "gt_path_available": True,
+                                "distance_to_gt_path": 1.8,
+                            }
+                        },
+                        "semantic_score_stats": {"has_clear_peak": True},
+                        "frontiers": [{"id": 1, "reachable": True, "semantic_score": 0.8}],
+                        "target_candidates": [],
+                        "navigation_history": {
+                            "recent_selected_skills": [SkillName.GEOMETRIC_EXPLORE.value],
+                            "recent_failures": [],
+                        },
+                    },
+                }
+            )
+            self.assertTrue(result["online_gt_deviation_reflection"]["triggered"])
+            self.assertFalse(result["online_gt_deviation_reflection"]["memory_written"])
+            self.assertEqual(result["online_gt_deviation_reflection"]["source"], "vlm_unavailable")
+            self.assertFalse(result["retrieved_lessons"])
 
 
 if __name__ == "__main__":

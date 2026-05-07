@@ -181,6 +181,8 @@ class MonitoredNavigationSkillExecutor:
             return "unconfirmed_target_candidate"
         if skill_name == SkillName.NAVIGATE_TO_CONFIRMED_TARGET.value:
             return "false_positive_stop"
+        if skill_name == SkillName.RETURN_TO_BEST_KNOWN_POINT.value:
+            return "return_to_best_point_failed"
         if skill_name == SkillName.RECOVER_FROM_STUCK.value:
             return "planner_stuck"
         return "skill_failed"

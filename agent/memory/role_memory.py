@@ -40,6 +40,12 @@ class RoleMemory:
         }
         if cfg.disable_recover_from_stuck and SkillName.RECOVER_FROM_STUCK.value in self.allowed_skills:
             self.allowed_skills.remove(SkillName.RECOVER_FROM_STUCK.value)
+        if cfg.disable_verify_target and SkillName.VERIFY_TARGET.value in self.allowed_skills:
+            self.allowed_skills.remove(SkillName.VERIFY_TARGET.value)
+        if cfg.disable_verify_target:
+            self.hard_constraints.append(
+                "do_not_select_VERIFY_TARGET; uncertain targets should continue exploration"
+            )
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

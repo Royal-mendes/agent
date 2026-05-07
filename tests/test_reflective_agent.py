@@ -60,6 +60,13 @@ class FakeContext:
             target_candidate_id=args.get("target_candidate_id"),
         )
 
+    def return_to_best_known_point(self, args):
+        return SkillExecutionResult(
+            skill_name=SkillName.RETURN_TO_BEST_KNOWN_POINT.value,
+            selected_waypoint=tuple(args.get("best_known_point") or (0.0, 0.0)),
+            raw_metadata={"returned_to_best_point": True},
+        )
+
     def mark_frontier_low_value(self, frontier_id):
         self.low_value_frontiers.append(frontier_id)
 
@@ -139,10 +146,10 @@ class ReflectiveAgentTests(unittest.TestCase):
         decision = agent.select_skill(state_with_target(0.9, multi_view=True), {}, {}, {})
         self.assertEqual(decision.selected_skill, SkillName.NAVIGATE_TO_CONFIRMED_TARGET.value)
 
-    def test_mock_agent_verifies_low_confidence_single_view_target(self):
+    def test_mock_agent_follows_apexnav_for_low_confidence_single_view_target_when_verify_disabled(self):
         agent = ReflectiveNavigationAgent(AgentConfig(vlm_provider="mock"))
         decision = agent.select_skill(state_with_target(0.68, multi_view=False), {}, {}, {})
-        self.assertEqual(decision.selected_skill, SkillName.VERIFY_TARGET.value)
+        self.assertEqual(decision.selected_skill, SkillName.FOLLOW_APEXNAV_PROPOSAL.value)
 
     def test_state_summarizer_includes_yolo_landmark_detections(self):
         state = StateSummarizer(AgentConfig(include_detected_objects_in_state=True)).summarize(
@@ -178,7 +185,7 @@ class ReflectiveAgentTests(unittest.TestCase):
         )
         result = validator.validate(decision, state_with_target(0.68, multi_view=False), {}, {}, {})
         self.assertFalse(result.accepted)
-        self.assertEqual(result.final_skill, SkillName.VERIFY_TARGET.value)
+        self.assertEqual(result.final_skill, SkillName.SEMANTIC_EXPLORE.value)
 
     def test_validator_uses_memory_to_reject_false_positive_condition(self):
         cfg = AgentConfig(require_multiview_before_stop=False)
@@ -198,7 +205,7 @@ class ReflectiveAgentTests(unittest.TestCase):
         )
         self.assertFalse(result.accepted)
         self.assertTrue(result.memory_rule_applied)
-        self.assertEqual(result.final_skill, SkillName.VERIFY_TARGET.value)
+        self.assertEqual(result.final_skill, SkillName.SEMANTIC_EXPLORE.value)
 
     def test_validator_uses_repeated_efficiency_memory_to_fallback(self):
         validator = DecisionValidator(AgentConfig(), build_default_skill_registry())
@@ -403,6 +410,96 @@ class ReflectiveAgentTests(unittest.TestCase):
         self.assertTrue(result.accepted)
         self.assertEqual(result.final_skill, SkillName.RECOVER_FROM_STUCK.value)
 
+    def test_validator_allows_return_to_best_with_gt_deviation(self):
+        registry = build_default_skill_registry()
+        validator = DecisionValidator(AgentConfig(gt_path_deviation_threshold=1.5), registry)
+        state = {
+            "frontiers": [{"id": 1, "reachable": True, "distance": 1.0}],
+            "target_candidates": [],
+            "navigation_history": {
+                "stuck_count": 0,
+                "recent_failures": [],
+                "best_known_point": {
+                    "available": True,
+                    "waypoint": [1.0, 2.0],
+                    "score": 0.8,
+                    "timestep": 3,
+                },
+            },
+            "gt_feedback": {
+                "gt_trajectory": {
+                    "distance_to_gt_path": 2.0,
+                    "gt_path_available": True,
+                }
+            },
+        }
+        result = validator.validate(
+            AgentDecision(selected_skill=SkillName.RETURN_TO_BEST_KNOWN_POINT.value),
+            state,
+            {},
+            {},
+            {},
+        )
+        self.assertTrue(result.accepted)
+        self.assertEqual(result.final_skill, SkillName.RETURN_TO_BEST_KNOWN_POINT.value)
+        self.assertEqual(result.final_arguments["best_known_point"], [1.0, 2.0])
+
+    def test_validator_allows_return_to_best_without_objective_failure(self):
+        registry = build_default_skill_registry()
+        validator = DecisionValidator(AgentConfig(gt_path_deviation_threshold=1.5), registry)
+        state = {
+            "frontiers": [{"id": 1, "reachable": True, "distance": 1.0}],
+            "target_candidates": [],
+            "semantic_score_stats": {"has_clear_peak": False},
+            "navigation_history": {
+                "stuck_count": 0,
+                "recent_failures": [],
+                "best_known_point": {"available": True, "waypoint": [1.0, 2.0]},
+            },
+            "gt_feedback": {"gt_trajectory": {"distance_to_gt_path": 0.2}},
+        }
+        result = validator.validate(
+            AgentDecision(selected_skill=SkillName.RETURN_TO_BEST_KNOWN_POINT.value),
+            state,
+            {},
+            {},
+            {},
+        )
+        self.assertTrue(result.accepted)
+        self.assertEqual(result.final_skill, SkillName.RETURN_TO_BEST_KNOWN_POINT.value)
+
+    def test_validator_rejects_return_to_best_without_best_point(self):
+        registry = build_default_skill_registry()
+        validator = DecisionValidator(AgentConfig(gt_path_deviation_threshold=1.5), registry)
+        state = {
+            "frontiers": [{"id": 1, "reachable": True, "distance": 1.0}],
+            "target_candidates": [],
+            "semantic_score_stats": {"has_clear_peak": False},
+            "navigation_history": {"stuck_count": 0, "recent_failures": []},
+            "gt_feedback": {"gt_trajectory": {"distance_to_gt_path": 0.2}},
+        }
+        result = validator.validate(
+            AgentDecision(selected_skill=SkillName.RETURN_TO_BEST_KNOWN_POINT.value),
+            state,
+            {},
+            {},
+            {},
+        )
+        self.assertFalse(result.accepted)
+        self.assertEqual(result.final_skill, SkillName.GEOMETRIC_EXPLORE.value)
+
+    def test_executor_accepts_return_to_best_postcondition(self):
+        registry = build_default_skill_registry()
+        context = FakeContext([{"timestep": 0}, {"timestep": 1}])
+        executor = MonitoredNavigationSkillExecutor(AgentConfig(), registry)
+        result = executor.execute(
+            SkillName.RETURN_TO_BEST_KNOWN_POINT.value,
+            {"best_known_point": [1.0, 2.0]},
+            context,
+        )
+        self.assertEqual(result.skill_name, SkillName.RETURN_TO_BEST_KNOWN_POINT.value)
+        self.assertTrue(result.postcondition_passed)
+
     def test_executor_detects_timeout(self):
         registry = build_default_skill_registry()
         context = FakeContext([{"timestep": 0}, {"timestep": 100}])
@@ -510,7 +607,7 @@ class ReflectiveAgentTests(unittest.TestCase):
         self.assertEqual(result.final_skill, SkillName.SEMANTIC_EXPLORE.value)
         self.assertEqual(result.final_arguments["frontier_id"], 1)
 
-    def test_validator_preempts_exploration_when_target_candidate_exists(self):
+    def test_validator_does_not_preempt_uncertain_target_when_verify_disabled(self):
         validator = DecisionValidator(AgentConfig(), build_default_skill_registry())
         result = validator.validate(
             AgentDecision(selected_skill=SkillName.GEOMETRIC_EXPLORE.value, skill_args={"frontier_id": 1}),
@@ -519,8 +616,8 @@ class ReflectiveAgentTests(unittest.TestCase):
             {},
             {},
         )
-        self.assertFalse(result.accepted)
-        self.assertEqual(result.final_skill, SkillName.VERIFY_TARGET.value)
+        self.assertTrue(result.accepted)
+        self.assertEqual(result.final_skill, SkillName.GEOMETRIC_EXPLORE.value)
 
     def test_mock_agent_can_follow_apexnav_for_baseline_sanity(self):
         agent = ReflectiveNavigationAgent(AgentConfig(vlm_provider="mock", mock_follow_apexnav_by_default=True))
@@ -578,7 +675,7 @@ class ReflectiveAgentTests(unittest.TestCase):
                 "state": state_with_target(0.68, multi_view=False),
             }
         )
-        self.assertEqual(result["selected_skill"], SkillName.VERIFY_TARGET.value)
+        self.assertEqual(result["selected_skill"], SkillName.FOLLOW_APEXNAV_PROPOSAL.value)
         self.assertIn("agent_decision", result)
         self.assertIn("validator_result", result)
 

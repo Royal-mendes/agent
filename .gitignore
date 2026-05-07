@@ -26,3 +26,22 @@ habitat-lab
 *.par
 bag
 wandb
+
+# Runtime artifacts and local-only files
+logs/
+repro/reflective_small_eval/
+repro/current_baseline_3ep_run.txt
+build.cache_mismatch_backup_*/
+*.bak
+*.bak_*
+*.snapshot_*
+*.reverted_from_*
+*.before_commitment_patch
+*.pyc
+
+# Secrets should be supplied through environment variables, never committed.
+.env
+.env.*
+secrets.*
+*_token*
+*_secret*

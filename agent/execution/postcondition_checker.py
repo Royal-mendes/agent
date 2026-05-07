@@ -30,6 +30,8 @@ class PostconditionChecker:
             return self._navigate_target(result_dict, before, after)
         if skill_name == SkillName.RECOVER_FROM_STUCK.value:
             return self._recover(result_dict, before, after)
+        if skill_name == SkillName.RETURN_TO_BEST_KNOWN_POINT.value:
+            return self._return_to_best_known_point(result_dict, before, after)
         if skill_name in {
             SkillName.FOLLOW_APEXNAV_PROPOSAL.value,
             SkillName.FALLBACK_APEXNAV.value,
@@ -104,6 +106,20 @@ class PostconditionChecker:
         if self._has_any(before, after, ["stuck_count", "blocked_frontier_count"]):
             return False, "recovery did not improve navigation state"
         return None, "recovery postcondition unavailable"
+
+    def _return_to_best_known_point(
+        self, result: Dict[str, Any], before: Dict[str, Any], after: Dict[str, Any]
+    ) -> Tuple[Optional[bool], str]:
+        if self._meta(result, "returned_to_best_point"):
+            return True, "best known point reached"
+        if result.get("selected_waypoint") is not None or self._meta(result, "new_valid_waypoint"):
+            return True, "valid waypoint selected toward best known point"
+        distance_delta = self._delta(after, before, "distance_to_best_known_point")
+        if distance_delta < 0:
+            return True, "distance to best known point decreased"
+        if self._has_any(before, after, ["distance_to_best_known_point"]):
+            return False, "did not move closer to best known point"
+        return None, "return-to-best postcondition unavailable"
 
     @staticmethod
     def _meta(result: Dict[str, Any], name: str) -> Any:

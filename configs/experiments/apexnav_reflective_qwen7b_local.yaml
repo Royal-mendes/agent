@@ -1,7 +1,7 @@
 reflective_agent:
   enable_reflective_agent: true
-  python_executable: /root/miniconda3/envs/apexnav/bin/python
-  project_root: /root/autodl-tmp/ApexNav/agent-Apexnav
+  python_executable: python
+  project_root: ""
   enable_vlm_skill_selector: true
   vlm_provider: local
   vlm_model: qwen2.5-vl-7b-instruct

@@ -13,7 +13,8 @@ Use retrieved lessons from previous episodes when relevant.
 Return only valid JSON.
 Do not invent unavailable skills.
 Do not select NAVIGATE_TO_CONFIRMED_TARGET unless the target candidate is sufficiently reliable.
-If uncertain, select VERIFY_TARGET or FALLBACK_APEXNAV.
+VERIFY_TARGET is disabled in this experiment.
+If a target is uncertain, continue exploration or select FOLLOW_APEXNAV_PROPOSAL instead of VERIFY_TARGET.
 Do not reveal chain-of-thought. Provide only a short reason."""
 
 

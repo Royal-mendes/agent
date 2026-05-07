@@ -66,7 +66,10 @@ class ReflectiveNavigationAgent:
                     reason="target candidate is reliable",
                     confidence=min(1.0, float(confidence)),
                 )
-            if confidence >= self.cfg.target_verify_threshold or not candidate.get("multi_view_confirmed"):
+            if (
+                not self.cfg.disable_verify_target
+                and (confidence >= self.cfg.target_verify_threshold or not candidate.get("multi_view_confirmed"))
+            ):
                 return AgentDecision(
                     selected_skill=SkillName.VERIFY_TARGET.value,
                     skill_args={"target_candidate_id": candidate.get("id")},
@@ -77,6 +80,16 @@ class ReflectiveNavigationAgent:
 
         history = state.get("navigation_history") or {}
         if history.get("stuck_count", 0) > 0 or history.get("recent_failures"):
+            best_known = self._best_known_point(state)
+            if best_known is not None:
+                return AgentDecision(
+                    status="recover",
+                    selected_skill=SkillName.RETURN_TO_BEST_KNOWN_POINT.value,
+                    skill_args={"best_known_point": best_known.get("waypoint")},
+                    expected_postcondition="return to the best historical navigation point",
+                    reason="recent navigation failure has a valid best known point",
+                    confidence=0.72,
+                )
             return AgentDecision(
                 status="recover",
                 selected_skill=SkillName.RECOVER_FROM_STUCK.value,
@@ -130,9 +143,7 @@ class ReflectiveNavigationAgent:
         if self.vlm_calls >= self.cfg.max_vlm_calls_per_episode:
             return AgentDecision.fallback("vlm call budget exhausted")
 
-        available_skills = (
-            self.skill_registry.specs_as_dict() if self.skill_registry is not None else {}
-        )
+        available_skills = self._available_skills_for_prompt()
         prompt_state_summary = self._state_for_vlm_prompt(state_summary)
         user_prompt = build_user_prompt(
             state_summary=prompt_state_summary,
@@ -176,6 +187,19 @@ class ReflectiveNavigationAgent:
             decision = AgentDecision.fallback("vlm response was not valid json")
             decision.raw_response = raw
             return decision
+
+    def _available_skills_for_prompt(self) -> Dict[str, Any]:
+        if self.skill_registry is None:
+            return {}
+        skills = self.skill_registry.specs_as_dict()
+        if self.cfg.disable_verify_target:
+            skills.pop(SkillName.VERIFY_TARGET.value, None)
+            for spec in skills.values():
+                if not isinstance(spec, dict):
+                    continue
+                if spec.get("recovery_action") == SkillName.VERIFY_TARGET.value:
+                    spec["recovery_action"] = SkillName.FOLLOW_APEXNAV_PROPOSAL.value
+        return skills
 
 
     def _state_for_vlm_prompt(self, state_summary: Dict[str, Any]) -> Dict[str, Any]:
@@ -226,6 +250,17 @@ class ReflectiveNavigationAgent:
         if prefer_semantic:
             return max(frontiers, key=lambda item: item.get("semantic_score") or 0.0)
         return min(frontiers, key=lambda item: item.get("distance") if item.get("distance") is not None else 1e9)
+
+    @staticmethod
+    def _best_known_point(state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        history = state.get("navigation_history") or {}
+        best = history.get("best_known_point") or state.get("best_known_point")
+        if not isinstance(best, dict) or not best.get("available", False):
+            return None
+        waypoint = best.get("waypoint") or best.get("position")
+        if not waypoint:
+            return None
+        return dict(best, waypoint=waypoint)
 
     @staticmethod
     def _to_dict(value: Any) -> Dict[str, Any]:

@@ -36,7 +36,9 @@ class EpisodeLogger:
         self.root = root
         self.run_id = run_id or datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         self.episodes_dir = os.path.join(self.root, self.run_id, "episodes")
+        self.visual_snapshots_dir = os.path.join(self.root, self.run_id, "visual_snapshots")
         os.makedirs(self.episodes_dir, exist_ok=True)
+        os.makedirs(self.visual_snapshots_dir, exist_ok=True)
 
     def episode_path(self, episode_id: Optional[str]) -> str:
         safe = self._safe_name(episode_id or "unknown_episode")
@@ -61,25 +63,25 @@ class EpisodeLogger:
         data = self._load_episode(episode_id)
         data.setdefault("episode_id", episode_id)
         data.setdefault("decisions", [])
-        data["decisions"].append(
-            _jsonable(
-                {
-                    "logged_at": _now_iso(),
-                    "timestep": timestep,
-                    "state_summary": state_summary,
-                    "role_memory": role_memory,
-                    "task_memory_snapshot": task_memory_snapshot,
-                    "working_memory_snapshot": working_memory_snapshot,
-                    "retrieved_lessons": retrieved_lessons,
-                    "active_policy_patches": active_policy_patches,
-                    "agent_decision": agent_decision,
-                    "validator_result": validator_result,
-                    "executed_skill": executed_skill,
-                    "skill_result": skill_result,
-                    "apexnav_fallback_used": apexnav_fallback_used,
-                }
-            )
-        )
+        visual_snapshot = self._write_visual_snapshot(episode_id, timestep, state_summary)
+        decision_record = {
+            "logged_at": _now_iso(),
+            "timestep": timestep,
+            "state_summary": state_summary,
+            "role_memory": role_memory,
+            "task_memory_snapshot": task_memory_snapshot,
+            "working_memory_snapshot": working_memory_snapshot,
+            "retrieved_lessons": retrieved_lessons,
+            "active_policy_patches": active_policy_patches,
+            "agent_decision": agent_decision,
+            "validator_result": validator_result,
+            "executed_skill": executed_skill,
+            "skill_result": skill_result,
+            "apexnav_fallback_used": apexnav_fallback_used,
+        }
+        if visual_snapshot:
+            decision_record["visual_snapshot"] = visual_snapshot
+        data["decisions"].append(_jsonable(decision_record))
         return self._write_episode(episode_id, data)
 
     def log_episode_end(
@@ -101,6 +103,55 @@ class EpisodeLogger:
     def read_episode_log(self, episode_id: Optional[str]) -> Dict[str, Any]:
         return self._load_episode(episode_id)
 
+    def visual_snapshot_path(self, episode_id: Optional[str], timestep: Any) -> str:
+        safe_episode = self._safe_name(episode_id or "unknown_episode")
+        safe_timestep = self._safe_name(timestep if timestep is not None else "unknown_timestep")
+        return os.path.join(self.visual_snapshots_dir, safe_episode, f"{safe_timestep}.json")
+
+    def _write_visual_snapshot(
+        self,
+        episode_id: Optional[str],
+        timestep: Any,
+        state_summary: Optional[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        if not isinstance(state_summary, dict):
+            return None
+        rgb = state_summary.get("rgb_observation") or {}
+        semmap = state_summary.get("semantic_map_observation") or {}
+        detected_objects = state_summary.get("detected_objects") or []
+        target_candidates = state_summary.get("target_candidates") or []
+
+        has_rgb_image = self._has_image_data(rgb)
+        has_semmap_image = self._has_image_data(semmap)
+        has_detected_objects = isinstance(detected_objects, list) and bool(detected_objects)
+        has_target_candidates = isinstance(target_candidates, list) and bool(target_candidates)
+        if not (has_rgb_image or has_semmap_image or has_detected_objects or has_target_candidates):
+            return None
+
+        snapshot = {
+            "episode_id": episode_id,
+            "timestep": timestep,
+            "created_at": _now_iso(),
+            "rgb_observation": rgb if isinstance(rgb, dict) else {},
+            "semantic_map_observation": semmap if isinstance(semmap, dict) else {},
+            "detected_objects": detected_objects if isinstance(detected_objects, list) else [],
+            "target_candidates": target_candidates if isinstance(target_candidates, list) else [],
+        }
+        path = self.visual_snapshot_path(episode_id, timestep)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp_path = f"{path}.tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(snapshot, f, sort_keys=True)
+            f.write("\n")
+        os.replace(tmp_path, path)
+        return {
+            "path": path,
+            "rgb_image_saved": has_rgb_image,
+            "semantic_map_image_saved": has_semmap_image,
+            "detected_object_count": len(snapshot["detected_objects"]),
+            "target_candidate_count": len(snapshot["target_candidates"]),
+        }
+
     def _load_episode(self, episode_id: Optional[str]) -> Dict[str, Any]:
         path = self.episode_path(episode_id)
         if not os.path.exists(path):
@@ -120,6 +171,16 @@ class EpisodeLogger:
             f.write("\n")
         os.replace(tmp_path, path)
         return path
+
+    @staticmethod
+    def _has_image_data(observation: Any) -> bool:
+        if not isinstance(observation, dict):
+            return False
+        for key in ("data_url", "image_url"):
+            value = observation.get(key)
+            if isinstance(value, str) and value.startswith("data:image/"):
+                return True
+        return False
 
     @staticmethod
     def _compute_agent_diagnostics(data: Dict[str, Any], episode_summary: Dict[str, Any]) -> Dict[str, Any]:

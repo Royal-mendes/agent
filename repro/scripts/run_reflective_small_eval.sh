@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
 set -o pipefail
 
-ROOT=/root/autodl-tmp/ApexNav/agent-Apexnav
+ROOT="${ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 DATASET="${DATASET:-hm3dv2}"
 DATASET_SPLIT="${DATASET_SPLIT:-}"
 EPISODE="${EPISODE:-2}"
 EP_TIMEOUT="${EP_TIMEOUT:-900}"
+VLM_START_TIMEOUT="${VLM_START_TIMEOUT:-180}"
 VLM_BASE_PORT="${VLM_BASE_PORT:-16181}"
 RUN_BASELINE="${RUN_BASELINE:-true}"
 RUN_REFLECTIVE="${RUN_REFLECTIVE:-true}"
 REFLECTIVE_VLM_PROVIDER="${REFLECTIVE_VLM_PROVIDER:-openai}"
 REFLECTIVE_VLM_MODEL="${REFLECTIVE_VLM_MODEL:-gpt-5.5}"
-REFLECTIVE_VLM_BASE_URL="${REFLECTIVE_VLM_BASE_URL:-https://ai.happyclaw.pro/v1}"
+REFLECTIVE_VLM_BASE_URL="${REFLECTIVE_VLM_BASE_URL:-}"
 REFLECTIVE_VLM_API_KEY="${REFLECTIVE_VLM_API_KEY:-}"
 REFLECTIVE_ENABLE_LEARNING_FROM_TRACES="${REFLECTIVE_ENABLE_LEARNING_FROM_TRACES:-true}"
 REFLECTIVE_ENABLE_BASELINE_TEACHER_LEARNING="${REFLECTIVE_ENABLE_BASELINE_TEACHER_LEARNING:-false}"
@@ -185,7 +186,7 @@ start_vlm() {
     local port="$3"
     nohup bash -lc "cd '$ROOT'; source /root/miniconda3/etc/profile.d/conda.sh; conda activate apexnav; export PYTHONNOUSERSITE=1 CUDA_VISIBLE_DEVICES=0 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 HF_DATASETS_OFFLINE=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 GDINO_PORT=$GDINO_PORT BLIP2ITM_PORT=$BLIP2ITM_PORT MOBILE_SAM_PORT=$MOBILE_SAM_PORT YOLOV7_PORT=$YOLOV7_PORT; python -m ${mod} --port ${port}" > "$LOGDIR/vlm_${name}_${port}.log" 2>&1 &
     echo $! >> "$VLM_PIDS"
-    if ! wait_for_port "$port" 180; then
+    if ! wait_for_port "$port" "$VLM_START_TIMEOUT"; then
       echo "failed_to_start_vlm=$name port=$port" | tee -a "$BASE/runner.log"
       return 1
     fi
@@ -210,11 +211,12 @@ set_reflective_config() {
     enable_gt_teacher="false"
     gt_trajectory_path=""
   fi
-  /root/miniconda3/envs/apexnav/bin/python - "$CONFIG" "$enabled" "$RUN_ID" "$mode" "$REFLECTIVE_VLM_PROVIDER" "$REFLECTIVE_VLM_MODEL" "$REFLECTIVE_VLM_BASE_URL" "$REFLECTIVE_VLM_API_KEY" "$REFLECTIVE_ENABLE_LEARNING_FROM_TRACES" "$REFLECTIVE_LEARNING_WRITE_MODE" "$REFLECTIVE_TOOL_CALL_DATASET_PATH" "$REFLECTIVE_MEMORY_PATH" "$REFLECTIVE_POLICY_PATCH_PATH" "$enable_baseline_teacher" "$baseline_teacher_log" "$enable_gt_teacher" "$gt_trajectory_path" <<'PY'
+  python - "$ROOT" "$CONFIG" "$enabled" "$RUN_ID" "$mode" "$REFLECTIVE_VLM_PROVIDER" "$REFLECTIVE_VLM_MODEL" "$REFLECTIVE_VLM_BASE_URL" "$REFLECTIVE_VLM_API_KEY" "$REFLECTIVE_ENABLE_LEARNING_FROM_TRACES" "$REFLECTIVE_LEARNING_WRITE_MODE" "$REFLECTIVE_TOOL_CALL_DATASET_PATH" "$REFLECTIVE_MEMORY_PATH" "$REFLECTIVE_POLICY_PATCH_PATH" "$enable_baseline_teacher" "$baseline_teacher_log" "$enable_gt_teacher" "$gt_trajectory_path" <<'PY'
 import sys
 import yaml
 
 (
+    root,
     path,
     enabled,
     run_id,
@@ -238,8 +240,8 @@ with open(path, "r", encoding="utf-8") as f:
 ra = data.setdefault("reflective_agent", {})
 ra["enable_reflective_agent"] = enabled.lower() == "true"
 ra["run_id"] = f"{run_id}_{mode}"
-ra["project_root"] = "/root/autodl-tmp/ApexNav/agent-Apexnav"
-ra["python_executable"] = "/root/miniconda3/envs/apexnav/bin/python"
+ra["project_root"] = str(root)
+ra["python_executable"] = sys.executable
 ra["memory_write_mode"] = learning_write_mode
 ra["memory_path"] = memory_path
 ra["policy_patch_path"] = policy_patch_path

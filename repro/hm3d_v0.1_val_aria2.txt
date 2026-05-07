@@ -1,23 +1,23 @@
 https://api.matterport.com/resources/habitat/hm3d-val-habitat.tar
   dir=/root/autodl-tmp/ApexNav/agent-Apexnav/data/downloads/hm3d_v0.1_val
   out=hm3d-val-habitat.tar
-  http-user=8cd69cb936fdda75
-  http-passwd=57eddcddac17192f4e1a635e72ec0d27
+  http-user=<MATTERPORT_HTTP_USER>
+  http-passwd=<MATTERPORT_HTTP_PASSWORD>
 
 https://api.matterport.com/resources/habitat/hm3d-val-configs.tar
   dir=/root/autodl-tmp/ApexNav/agent-Apexnav/data/downloads/hm3d_v0.1_val
   out=hm3d-val-configs.tar
-  http-user=8cd69cb936fdda75
-  http-passwd=57eddcddac17192f4e1a635e72ec0d27
+  http-user=<MATTERPORT_HTTP_USER>
+  http-passwd=<MATTERPORT_HTTP_PASSWORD>
 
 https://api.matterport.com/resources/habitat/hm3d-val-semantic-annots-v0.1.tar.gz
   dir=/root/autodl-tmp/ApexNav/agent-Apexnav/data/downloads/hm3d_v0.1_val
   out=hm3d-val-semantic-annots-v0.1.tar.gz
-  http-user=8cd69cb936fdda75
-  http-passwd=57eddcddac17192f4e1a635e72ec0d27
+  http-user=<MATTERPORT_HTTP_USER>
+  http-passwd=<MATTERPORT_HTTP_PASSWORD>
 
 https://api.matterport.com/resources/habitat/hm3d-val-semantic-configs-v0.1.tar
   dir=/root/autodl-tmp/ApexNav/agent-Apexnav/data/downloads/hm3d_v0.1_val
   out=hm3d-val-semantic-configs-v0.1.tar
-  http-user=8cd69cb936fdda75
-  http-passwd=57eddcddac17192f4e1a635e72ec0d27
+  http-user=<MATTERPORT_HTTP_USER>
+  http-passwd=<MATTERPORT_HTTP_PASSWORD>

@@ -13,6 +13,16 @@ from agent.skill.skills import build_default_skill_registry
 from agent.validator import DecisionValidator
 
 
+class FakeReflectionProvider:
+    def __init__(self, response):
+        self.response = response
+        self.calls = []
+
+    def generate(self, system_prompt, user_prompt, image_data_url=None, image_data_urls=None):
+        self.calls.append((system_prompt, user_prompt))
+        return self.response
+
+
 def target_state(confidence=0.68, multi_view=False):
     return {
         "target_category": "toilet",
@@ -64,6 +74,120 @@ class ReflectionPipelineTests(unittest.TestCase):
         self.assertEqual(item["failure_class"], FailureClass.DEGRADING.value)
         self.assertIn("verify", item["lesson"].lower())
         self.assertEqual(result["policy_patch_proposals"][0]["recommended_action"], SkillName.VERIFY_TARGET.value)
+
+    def test_reflection_engine_uses_vlm_episode_reflection_when_available(self):
+        provider = FakeReflectionProvider(
+            json.dumps(
+                {
+                    "failure_analysis": "The agent stopped after weak single-view target evidence.",
+                    "bad_decision": "NAVIGATE_TO_CONFIRMED_TARGET was selected before verification.",
+                    "better_decision": "Verify the target from another viewpoint before stopping.",
+                    "better_skill": SkillName.VERIFY_TARGET.value,
+                    "lesson": "When a toilet candidate is single-view and below the stop threshold, use VERIFY_TARGET before final navigation.",
+                    "failure_type": "false_positive_stop",
+                    "failure_class": FailureClass.DEGRADING.value,
+                    "state_condition_updates": {"single_view_candidate": True},
+                    "suggested_policy_patch": {
+                        "trigger_condition": {
+                            "selected_skill": SkillName.NAVIGATE_TO_CONFIRMED_TARGET.value,
+                            "multi_view_confirmed": False,
+                        },
+                        "recommended_action": SkillName.VERIFY_TARGET.value,
+                        "rationale": "VLM episode reflection identified premature stop.",
+                        "confidence": 0.88,
+                    },
+                    "confidence": 0.88,
+                }
+            )
+        )
+        engine = ReflectionEngine(
+            AgentConfig(enable_vlm_episode_reflection=True, vlm_provider="local"),
+            vlm_provider=provider,
+        )
+        result = engine.reflect_episode(
+            {
+                "episode_id": "ep_vlm",
+                "scene_id": "scene",
+                "split": "val",
+                "target_category": "toilet",
+                "success": False,
+                "failure_type": "missing_target",
+                "selected_skill_sequence": [SkillName.NAVIGATE_TO_CONFIRMED_TARGET.value],
+                "decisions": [
+                    {
+                        "timestep": 12,
+                        "agent_decision": {
+                            "selected_skill": SkillName.NAVIGATE_TO_CONFIRMED_TARGET.value,
+                            "skill_args": {"target_candidate_id": 3},
+                        },
+                        "state_summary": target_state(confidence=0.68, multi_view=False),
+                    }
+                ],
+            }
+        )
+        self.assertEqual(result["reflection_source"], "vlm_episode_reflection")
+        self.assertEqual(result["experience_memory_item"]["failure_type"], "false_positive_stop")
+        self.assertIn("VERIFY_TARGET", result["experience_memory_item"]["lesson"])
+        self.assertTrue(result["experience_memory_item"]["state_condition"]["single_view_candidate"])
+        self.assertEqual(result["policy_patch_proposals"][0]["recommended_action"], SkillName.VERIFY_TARGET.value)
+        self.assertEqual(len(provider.calls), 1)
+
+    def test_vlm_episode_reflection_reads_logged_decisions(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            episode_dir = os.path.join(tmpdir, "run", "episodes")
+            os.makedirs(episode_dir)
+            with open(os.path.join(episode_dir, "ep_logged.json"), "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "decisions": [
+                            {
+                                "timestep": 7,
+                                "agent_decision": {
+                                    "selected_skill": SkillName.SEMANTIC_EXPLORE.value,
+                                    "skill_args": {"frontier_id": 4},
+                                },
+                                "validator_result": {
+                                    "final_skill": SkillName.SEMANTIC_EXPLORE.value,
+                                    "accepted": True,
+                                },
+                                "executed_skill": SkillName.SEMANTIC_EXPLORE.value,
+                                "state_summary": target_state(),
+                            }
+                        ]
+                    },
+                    f,
+                )
+            provider = FakeReflectionProvider(
+                json.dumps(
+                    {
+                        "failure_analysis": "Semantic exploration did not improve target evidence.",
+                        "lesson": "Switch away from repeated semantic exploration when evidence remains weak.",
+                        "better_skill": SkillName.GEOMETRIC_EXPLORE.value,
+                        "confidence": 0.77,
+                    }
+                )
+            )
+            cfg = AgentConfig(
+                enable_vlm_episode_reflection=True,
+                vlm_provider="local",
+                episode_log_root=tmpdir,
+                run_id="run",
+            )
+            engine = ReflectionEngine(cfg, vlm_provider=provider)
+            result = engine.reflect_episode(
+                {
+                    "episode_id": "ep_logged",
+                    "split": "val",
+                    "target_category": "toilet",
+                    "success": False,
+                    "failure_type": "semantic_explore_no_progress",
+                }
+            )
+            prompt_payload = json.loads(provider.calls[0][1])
+            recent = prompt_payload["episode"]["recent_decisions"]
+            self.assertEqual(recent[0]["selected_skill"], SkillName.SEMANTIC_EXPLORE.value)
+            self.assertEqual(recent[0]["skill_args"]["frontier_id"], 4)
+            self.assertEqual(result["reflection_source"], "vlm_episode_reflection")
 
     def test_reflection_engine_writes_train_memory_and_skips_test(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -154,7 +278,7 @@ class ReflectionPipelineTests(unittest.TestCase):
         )
         self.assertFalse(result.accepted)
         self.assertTrue(result.policy_patch_applied)
-        self.assertEqual(result.final_skill, SkillName.VERIFY_TARGET.value)
+        self.assertEqual(result.final_skill, SkillName.SEMANTIC_EXPLORE.value)
 
     def test_episode_logger_records_decision_and_end(self):
         with tempfile.TemporaryDirectory() as tmpdir:

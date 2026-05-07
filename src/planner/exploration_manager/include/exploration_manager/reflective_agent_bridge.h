@@ -55,6 +55,18 @@ struct ReflectiveAgentState {
   bool committed_target_reached = false;
   bool structural_frontier_change = false;
   bool stable_target_event = false;
+  bool best_known_point_valid = false;
+  Eigen::Vector2d best_known_point = Eigen::Vector2d::Zero();
+  double best_known_score = 0.0;
+  double best_known_evidence_score = 0.0;
+  double best_known_distance_to_current = -1.0;
+  double best_known_target_confidence = 0.0;
+  int best_known_target_views = 0;
+  double best_known_semantic_score = 0.0;
+  double best_known_frontier_score = 0.0;
+  int best_known_frontier_count = 0;
+  int best_known_timestep = -1;
+  std::string best_known_reason;
   std::string rgb_observation_json;
   std::string semantic_map_observation_json;
   std::string detected_objects_json;
@@ -96,6 +108,7 @@ private:
   std::string buildConfigJson() const;
   std::string buildStateJson(const ReflectiveAgentState& state) const;
   static std::string jsonEscape(const std::string& value);
+  static std::string jsonNumber(double value);
   static std::string shellQuote(const std::string& value);
   static bool writeTextFile(const std::string& path, const std::string& text);
   static bool readTextFile(const std::string& path, std::string& text);
@@ -116,7 +129,7 @@ private:
   std::string vlm_provider_ = "mock";
   std::string vlm_model_ = "gpt-5.5";
   std::string vlm_api_key_;
-  std::string vlm_base_url_ = "https://ai.happyclaw.pro/v1";
+  std::string vlm_base_url_ = "";
   std::string memory_path_ = "data/reflection_memory.jsonl";
   std::string memory_read_mode_ = "enabled";
   std::string memory_write_mode_ = "all";

@@ -49,7 +49,10 @@ class DecisionValidator:
         if target_preemption is not None:
             return target_preemption
 
-        if original == SkillName.RECOVER_FROM_STUCK.value and self._recent_recovery_active(state_summary):
+        if original in {
+            SkillName.RECOVER_FROM_STUCK.value,
+            SkillName.RETURN_TO_BEST_KNOWN_POINT.value,
+        } and self._recent_recovery_active(state_summary):
             return self._reject(
                 original,
                 SkillName.FALLBACK_APEXNAV.value,
@@ -63,18 +66,33 @@ class DecisionValidator:
                 state_summary,
                 "recovery requires objective stuck, collision, timeout, frontier, or planner failure evidence",
             )
+        if original == SkillName.RETURN_TO_BEST_KNOWN_POINT.value and not self._return_to_best_precondition_met(state_summary):
+            return self._fallback_to_exploration(
+                original,
+                state_summary,
+                "return-to-best requires a valid best known point",
+            )
 
         if self._current_failure_is_degrading(state_summary):
             if original not in {
                 SkillName.RECOVER_FROM_STUCK.value,
+                SkillName.RETURN_TO_BEST_KNOWN_POINT.value,
                 SkillName.FALLBACK_APEXNAV.value,
             }:
-                final_skill = (
-                    SkillName.FALLBACK_APEXNAV.value
-                    if self.cfg.disable_recover_from_stuck
-                    else SkillName.RECOVER_FROM_STUCK.value
+                if self._best_known_point(state_summary) and not self.cfg.disable_recover_from_stuck:
+                    final_skill = SkillName.RETURN_TO_BEST_KNOWN_POINT.value
+                else:
+                    final_skill = (
+                        SkillName.FALLBACK_APEXNAV.value
+                        if self.cfg.disable_recover_from_stuck
+                        else SkillName.RECOVER_FROM_STUCK.value
+                    )
+                return self._reject(
+                    original,
+                    final_skill,
+                    self._recommended_arguments(final_skill, state_summary),
+                    "degrading failure requires recovery",
                 )
-                return self._reject(original, final_skill, {}, "degrading failure requires recovery")
 
         patch_result = self._validate_policy_patches(decision, state_summary, active_policy_patches)
         if patch_result is not None:
@@ -87,11 +105,15 @@ class DecisionValidator:
         if original == SkillName.NAVIGATE_TO_CONFIRMED_TARGET.value:
             return self._validate_target_navigation(decision, state_summary, retrieved_lessons)
         if original == SkillName.VERIFY_TARGET.value:
+            if self.cfg.disable_verify_target:
+                return self._fallback_to_exploration(original, state_summary, "verify target disabled")
             return self._validate_verify_target(decision, state_summary)
         if original == SkillName.SEMANTIC_EXPLORE.value:
             return self._validate_semantic_explore(decision, state_summary)
         if original == SkillName.GEOMETRIC_EXPLORE.value:
             return self._validate_geometric_explore(decision, state_summary)
+        if original == SkillName.RETURN_TO_BEST_KNOWN_POINT.value:
+            return self._validate_return_to_best_known_point(decision, state_summary)
         if original == SkillName.RECOVER_FROM_STUCK.value:
             if self.cfg.disable_recover_from_stuck:
                 return self._reject(original, SkillName.FALLBACK_APEXNAV.value, {}, "recovery skill disabled")
@@ -139,10 +161,12 @@ class DecisionValidator:
                 final_skill=SkillName.NAVIGATE_TO_CONFIRMED_TARGET.value,
                 final_arguments={"target_candidate_id": candidate.get("id")},
                 original_skill=original,
-                accepted=False,
+                accepted=True,
                 rejection_reason="confirmed target candidate preempts exploration",
                 fallback_used=False,
             )
+        if not confirmed and self.cfg.disable_verify_target:
+            return None
         if not confirmed and original != SkillName.VERIFY_TARGET.value:
             return ValidatorResult(
                 final_skill=SkillName.VERIFY_TARGET.value,
@@ -165,11 +189,17 @@ class DecisionValidator:
         if candidate is None:
             return self._reject(original, SkillName.FALLBACK_APEXNAV.value, {}, "no target candidate")
         if candidate.get("rejected_false_positive"):
+            if self.cfg.disable_verify_target:
+                return self._fallback_to_exploration(original, state, "candidate rejected")
             return self._reject(original, SkillName.VERIFY_TARGET.value, {"target_candidate_id": candidate.get("id")}, "candidate rejected")
         if not candidate.get("reachable", True):
+            if self.cfg.disable_verify_target:
+                return self._fallback_to_exploration(original, state, "candidate unreachable")
             return self._reject(original, SkillName.VERIFY_TARGET.value, {"target_candidate_id": candidate.get("id")}, "candidate unreachable")
         confidence = candidate.get("confidence") or 0.0
         if confidence < self.cfg.target_stop_threshold:
+            if self.cfg.disable_verify_target:
+                return self._fallback_to_exploration(original, state, "confidence below stop threshold")
             return self._reject(
                 original,
                 SkillName.VERIFY_TARGET.value,
@@ -177,6 +207,8 @@ class DecisionValidator:
                 "confidence below stop threshold",
             )
         if self.cfg.require_multiview_before_stop and not candidate.get("multi_view_confirmed"):
+            if self.cfg.disable_verify_target:
+                return self._fallback_to_exploration(original, state, "multiview confirmation required")
             return self._reject(
                 original,
                 SkillName.VERIFY_TARGET.value,
@@ -184,6 +216,10 @@ class DecisionValidator:
                 "multiview confirmation required",
             )
         if self._memory_blocks_target_stop(candidate, state, lessons):
+            if self.cfg.disable_verify_target:
+                result = self._fallback_to_exploration(original, state, "retrieved memory blocks target stop")
+                result.memory_rule_applied = True
+                return result
             return ValidatorResult(
                 final_skill=SkillName.VERIFY_TARGET.value,
                 final_arguments={"target_candidate_id": candidate.get("id")},
@@ -260,6 +296,31 @@ class DecisionValidator:
             accepted=True,
         )
 
+    def _validate_return_to_best_known_point(self, decision: AgentDecision, state: Dict[str, Any]) -> ValidatorResult:
+        original = decision.selected_skill
+        if self.cfg.disable_recover_from_stuck:
+            return self._reject(original, SkillName.FALLBACK_APEXNAV.value, {}, "recovery skills disabled")
+        best = self._best_known_point(state)
+        if best is None:
+            return self._fallback_to_exploration(original, state, "best known point unavailable")
+        if not self._return_to_best_precondition_met(state):
+            return self._fallback_to_exploration(
+                original,
+                state,
+                "return-to-best requires a valid best known point",
+            )
+        args = {
+            "best_known_point": best.get("waypoint"),
+            "best_known_timestep": best.get("timestep"),
+            "best_known_score": best.get("score"),
+        }
+        return ValidatorResult(
+            final_skill=original,
+            final_arguments={k: v for k, v in args.items() if v is not None},
+            original_skill=original,
+            accepted=True,
+        )
+
     def _validate_policy_patches(
         self,
         decision: AgentDecision,
@@ -274,6 +335,14 @@ class DecisionValidator:
                 continue
             if not self._policy_patch_matches(patch, decision, state):
                 continue
+            if action == SkillName.VERIFY_TARGET.value and self.cfg.disable_verify_target:
+                result = self._fallback_to_exploration(
+                    decision.selected_skill,
+                    state,
+                    "active policy patch recommended disabled VERIFY_TARGET",
+                )
+                result.policy_patch_applied = True
+                return result
             return ValidatorResult(
                 final_skill=action,
                 final_arguments=self._recommended_arguments(action, state),
@@ -411,6 +480,9 @@ class DecisionValidator:
         if action == SkillName.GEOMETRIC_EXPLORE.value:
             frontier = self._frontier_by_id(state, None, prefer_semantic=False)
             return {"frontier_id": frontier.get("id")} if frontier else {}
+        if action == SkillName.RETURN_TO_BEST_KNOWN_POINT.value:
+            best = self._best_known_point(state)
+            return {"best_known_point": best.get("waypoint")} if best else {}
         return {}
 
     @staticmethod
@@ -545,7 +617,40 @@ class DecisionValidator:
     @staticmethod
     def _recent_recovery_active(state: Dict[str, Any]) -> bool:
         skills = (state.get("navigation_history") or {}).get("recent_selected_skills") or []
-        return bool(skills and skills[-1] == SkillName.RECOVER_FROM_STUCK.value)
+        return bool(
+            skills
+            and skills[-1]
+            in {
+                SkillName.RECOVER_FROM_STUCK.value,
+                SkillName.RETURN_TO_BEST_KNOWN_POINT.value,
+            }
+        )
+
+    def _return_to_best_precondition_met(self, state: Dict[str, Any]) -> bool:
+        return self._best_known_point(state) is not None
+
+    def _gt_deviation_signal(self, state: Dict[str, Any]) -> bool:
+        reflection = state.get("online_gt_deviation_reflection") or {}
+        if reflection.get("triggered"):
+            return True
+        gt = state.get("gt_feedback") or {}
+        trajectory = gt.get("gt_trajectory") if isinstance(gt.get("gt_trajectory"), dict) else {}
+        distance = trajectory.get("distance_to_gt_path")
+        try:
+            return distance is not None and float(distance) >= float(self.cfg.gt_path_deviation_threshold)
+        except (TypeError, ValueError):
+            return False
+
+    @staticmethod
+    def _best_known_point(state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        history = state.get("navigation_history") or {}
+        best = history.get("best_known_point") or state.get("best_known_point")
+        if not isinstance(best, dict) or not best.get("available", False):
+            return None
+        waypoint = best.get("waypoint") or best.get("position")
+        if not waypoint:
+            return None
+        return dict(best, waypoint=waypoint)
 
     def _memory_blocks_target_stop(
         self,
